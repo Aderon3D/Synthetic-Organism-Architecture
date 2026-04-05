@@ -351,7 +351,7 @@ export default function OrganismSimulation() {
 
                 <div className="mt-6 w-full bg-neutral-950 rounded-lg p-3 border border-neutral-800">
                   <h3 className="text-[10px] uppercase tracking-wider text-neutral-500 mb-1 text-left">Current Linguistic Style</h3>
-                  <p className="text-xs text-indigo-300 italic text-left">"{simState.linguisticStyle}"</p>
+                  <p className="text-xs text-indigo-300 italic text-left">&quot;{simState.linguisticStyle}&quot;</p>
                 </div>
               </div>
             </section>
@@ -503,7 +503,7 @@ export default function OrganismSimulation() {
                   {simState.toyState.type ? (
                     <div className="flex flex-col gap-1">
                       <div className="text-pink-400/80 uppercase tracking-widest">{simState.toyState.type}</div>
-                      <div className="text-neutral-400 italic">"{simState.toyState.lastResult || 'Initializing...'}"</div>
+                      <div className="text-neutral-400 italic">&quot;{simState.toyState.lastResult || 'Initializing...'}&quot;</div>
                     </div>
                   ) : (
                     <div className="opacity-50 italic">No active instrument.</div>

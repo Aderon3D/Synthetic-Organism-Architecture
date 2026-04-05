@@ -22,6 +22,7 @@ type SimulationAction =
   | { type: 'INJECT_SURPRISE', payload: number }
   | { type: 'DRAIN_ENERGY', payload: number }
   | { type: 'RESET_BOREDOM' }
+  | { type: 'RESET_FREE_ENERGY' }
   | { type: 'SET_ACTIVE_TOY', payload: ToyType | null }
   | { type: 'TOY_ACTION', payload: { action: string } }
   | { type: 'SET_LINGUISTIC_STYLE', payload: string }
@@ -72,6 +73,8 @@ function simulationReducer(state: SimulationState, action: SimulationAction): Si
       return { ...state, energy: clamp(state.energy - action.payload, 0, 100) };
     case 'RESET_BOREDOM':
       return { ...state, boredom: 0 };
+    case 'RESET_FREE_ENERGY':
+      return { ...state, freeEnergy: 0 };
     case 'SET_ACTIVE_TOY': {
       let initialData = null;
       if (action.payload === 'blocks') initialData = { height: 0, stability: 100 };

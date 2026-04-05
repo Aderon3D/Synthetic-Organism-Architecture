@@ -101,11 +101,11 @@ export function calculateNextLsmNodes(prevNodes: number[], noiseLevel: number): 
 export function calculateNextMetabolism(prevEnergy: number, llmState: LLMState): number {
   let nextEnergy = prevEnergy;
   if (llmState === 'SLEEPING') {
-    nextEnergy += 2.0; 
+    nextEnergy += 3.0; // Faster recovery
   } else if (llmState === 'IDLE') {
-    nextEnergy += 0.5; 
+    nextEnergy += 0.2; // Slight drift up
   } else {
-    nextEnergy -= 1.5; 
+    nextEnergy -= 0.8; // Reduced drain (was 1.5)
   }
   return clamp(nextEnergy, 0, 100);
 }

@@ -72,6 +72,17 @@ export function useLLMBrain({
 }: UseLLMBrainProps) {
   
   const isProcessingRef = useRef(false);
+  const isMountedRef = useRef(true);
+  const simStateRef = useRef(simState);
+
+  useEffect(() => {
+    simStateRef.current = simState;
+  }, [simState]);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => { isMountedRef.current = false; };
+  }, []);
 
   // Hard state transitions based on energy/boredom/freeEnergy
   useEffect(() => {
@@ -101,10 +112,21 @@ export function useLLMBrain({
     }
   }, [simState.energy, simState.freeEnergy, simState.boredom, simState.llmState, dispatch, addLog, addThought, setBrowserState]);
 
+  // Stable WAKING transition
+  useEffect(() => {
+    if (simState.llmState === 'WAKING') {
+      const timer = setTimeout(() => {
+        if (isMountedRef.current) {
+          addLog('Prefrontal Cortex active. Initiating search.', 'system');
+          dispatch({ type: 'SET_LLM_STATE', payload: 'FORAGING' });
+        }
+      }, 1500);
+      return () => clearTimeout(timer);
+    }
+  }, [simState.llmState, dispatch, addLog]);
+
   // Async LLM operations
   useEffect(() => {
-    let isMounted = true;
-
     const runAsyncThought = async () => {
       if (isProcessingRef.current) return;
       
@@ -116,31 +138,43 @@ export function useLLMBrain({
       const ai = new GoogleGenAI({ apiKey });
       
       // Summarize LSM state for prompt
-      const lsmSummary = simState.lsmNodes.reduce((acc, val) => acc + val, 0) / simState.lsmNodes.length;
+      const state = simStateRef.current;
+      const lsmSummary = state.lsmNodes.reduce((acc, val) => acc + val, 0) / state.lsmNodes.length;
       const lsmContext = `Sensory reservoir activity level: ${(lsmSummary * 100).toFixed(1)}%`;
-      const persona = getPersonaInstruction(simState);
+      const persona = getPersonaInstruction(state);
       
       // Dual Memory Context
       const workingMemory = notepad.slice(-5).join(' | ') || 'Empty';
-      const episodicMemory = simState.episodicMemory.map(m => `T=${m.time}: [Stimulus: ${m.stimulus}] -> [Outcome: ${m.outcome}]`).join('\n') || 'No significant experiences recorded.';
+      const episodicMemory = state.episodicMemory.map(m => `T=${m.time}: [Stimulus: ${m.stimulus}] -> [Outcome: ${m.outcome}]`).join('\n') || 'No significant experiences recorded.';
 
-      if (simState.llmState === 'WAKING') {
-        isProcessingRef.current = true;
-        setTimeout(() => {
-          if (isMounted) {
-            dispatch({ type: 'SET_LLM_STATE', payload: 'FORAGING' });
-            isProcessingRef.current = false;
+      const callWithRetry = async (fn: () => Promise<any>, maxRetries = 3) => {
+        let lastError;
+        for (let i = 0; i < maxRetries; i++) {
+          try {
+            return await fn();
+          } catch (e) {
+            lastError = e;
+            const isNetworkError = e instanceof Error && (e.message.includes('fetch') || e.message.includes('Rpc failed') || e.message.includes('xhr'));
+            if (isNetworkError && i < maxRetries - 1) {
+              const delay = Math.pow(2, i) * 2000;
+              addLog(`API connection issue. Retrying in ${delay/1000}s... (Attempt ${i+1}/${maxRetries})`, 'system');
+              await new Promise(resolve => setTimeout(resolve, delay));
+            } else {
+              throw e;
+            }
           }
-        }, 1500);
-      } 
-      else if (simState.llmState === 'FORAGING') {
+        }
+        throw lastError;
+      };
+
+      if (state.llmState === 'FORAGING') {
         isProcessingRef.current = true;
         addLog('LLM Active: Initiating Epistemic Foraging.', 'action');
         setBrowserState({ active: true, query: 'Thinking...', result: null });
         
         try {
           const prompt = `${persona}
-          Current state: Energy ${simState.energy.toFixed(1)}%, Uncertainty ${simState.freeEnergy.toFixed(1)}%, Boredom ${simState.boredom.toFixed(1)}%.
+          Current state: Energy ${state.energy.toFixed(1)}%, Uncertainty ${state.freeEnergy.toFixed(1)}%, Boredom ${state.boredom.toFixed(1)}%.
           ${lsmContext}
           
           [DUAL MEMORY SYSTEM]
@@ -153,7 +187,7 @@ export function useLLMBrain({
           Task: You are uncertain and must search the web to understand your environment or the last stimulus.
           Provide your internal thought process, and the exact search query you want to type into your browser.`;
           
-          const response = await ai.models.generateContent({
+          const response = await callWithRetry(() => ai.models.generateContent({
             model: "gemini-3.1-flash-lite-preview",
             contents: prompt,
             config: {
@@ -167,33 +201,36 @@ export function useLLMBrain({
                 required: ["thought", "query"]
               }
             }
-          });
+          }));
           
           const res = JSON.parse(response.text || '{}');
           
-          if (isMounted && res.query) {
+          if (isMountedRef.current && res.query) {
             setBrowserState({ active: true, query: res.query, result: "Searching..." });
             addThought(res.thought, 'thought');
             addThought(`[Browser] Search: "${res.query}"`, 'action');
             
             setTimeout(() => {
-              if (isMounted) {
-                dispatch({ type: 'SET_LLM_STATE', payload: 'CONSOLIDATING' });
+              if (isMountedRef.current) {
                 isProcessingRef.current = false;
+                dispatch({ type: 'SET_LLM_STATE', payload: 'CONSOLIDATING' });
               }
             }, 2000);
           } else {
              isProcessingRef.current = false;
-             if (isMounted) dispatch({ type: 'SET_LLM_STATE', payload: 'IDLE' });
+             if (isMountedRef.current) dispatch({ type: 'SET_LLM_STATE', payload: 'IDLE' });
           }
         } catch (e) {
           console.error(e);
           addLog(`Search error: ${e instanceof Error ? e.message : 'Unknown error'}`, 'alert');
           isProcessingRef.current = false;
-          if (isMounted) dispatch({ type: 'SET_LLM_STATE', payload: 'IDLE' });
+          if (isMountedRef.current) {
+            dispatch({ type: 'RESET_FREE_ENERGY' }); // Prevent loop
+            dispatch({ type: 'SET_LLM_STATE', payload: 'IDLE' });
+          }
         }
       }
-      else if (simState.llmState === 'CONSOLIDATING') {
+      else if (state.llmState === 'CONSOLIDATING') {
         isProcessingRef.current = true;
         addLog('Uncertainty reduced. Consolidating new priors.', 'info');
         try {
@@ -211,7 +248,7 @@ export function useLLMBrain({
           Rewrite your entire "Base Linguistic Style" to incorporate this new knowledge. Keep your core traits but add the new nuance (e.g., if you were "robotic", you might become "robotic but prone to poetic metaphors"). Keep it under 15 words.
           Finally, summarize this entire event as a new "Episodic Memory" (Outcome).`;
           
-          const response = await ai.models.generateContent({
+          const response = await callWithRetry(() => ai.models.generateContent({
             model: "gemini-3.1-flash-lite-preview",
             contents: prompt,
             config: {
@@ -229,20 +266,20 @@ export function useLLMBrain({
                 required: ["thought", "note", "styleEvolution", "outcomeSummary"]
               }
             }
-          });
+          }));
           
           // Extract search result from grounding metadata
           let searchResult = "No concrete result found.";
           const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
           if (chunks && chunks.length > 0) {
-             searchResult = chunks.map(c => c.web?.title).filter(Boolean).join(", ");
+             searchResult = chunks.map((c: any) => c.web?.title).filter(Boolean).join(", ");
              addLog(`Search successful: ${chunks.length} results found.`, 'info');
           } else {
              addLog(`Search returned no grounding metadata.`, 'alert');
           }
 
           const res = JSON.parse(response.text || '{}');
-          if (isMounted && res.note) {
+          if (isMountedRef.current && res.note) {
             setNotepad(prev => [...prev, res.note]);
             setBrowserState(prev => ({ ...prev, result: searchResult }));
             
@@ -256,7 +293,7 @@ export function useLLMBrain({
             dispatch({ 
               type: 'ADD_EPISODIC_MEMORY', 
               payload: {
-                time: simState.time,
+                time: state.time,
                 stimulus: lastStimulus || browserState.query,
                 thought: res.thought,
                 outcome: res.outcomeSummary
@@ -266,23 +303,27 @@ export function useLLMBrain({
             addThought(res.thought, 'thought');
             addThought(`[Notepad] Write: "${res.note}"`, 'action');
             setBrowserState({ active: false, query: '', result: null });
+            isProcessingRef.current = false;
             dispatch({ type: 'SET_LLM_STATE', payload: 'IDLE' });
           }
         } catch (e) {
           console.error(e);
-          if (isMounted) dispatch({ type: 'SET_LLM_STATE', payload: 'IDLE' });
+          if (isMountedRef.current) {
+            dispatch({ type: 'RESET_FREE_ENERGY' }); // Prevent loop
+            dispatch({ type: 'SET_LLM_STATE', payload: 'IDLE' });
+          }
         } finally {
           isProcessingRef.current = false;
         }
       }
-      else if (simState.llmState === 'PLAYING_INIT') {
+      else if (state.llmState === 'PLAYING_INIT') {
         isProcessingRef.current = true;
         try {
           const prompt = `${persona}
           Task: You are extremely bored. Available toys: blocks, spinner, chimes.
           Provide your internal thought process on why you want to play, and choose a toy.`;
           
-          const response = await ai.models.generateContent({
+          const response = await callWithRetry(() => ai.models.generateContent({
             model: "gemini-3.1-flash-lite-preview",
             contents: prompt,
             config: {
@@ -296,22 +337,24 @@ export function useLLMBrain({
                 required: ["thought", "toy"]
               }
             }
-          });
+          }));
           
           const res = JSON.parse(response.text || '{}');
-          if (isMounted && res.toy) {
-            dispatch({ type: 'SET_ACTIVE_TOY', payload: res.toy as ToyType });
+          if (isMountedRef.current && res.toy) {
             addLog(`Boredom threshold reached. Engaging with toy: ${res.toy}`, 'info');
             addThought(res.thought, 'thought');
             addThought(`[Toy] Interact with ${res.toy}.`, 'action');
+            isProcessingRef.current = false;
+            dispatch({ type: 'SET_ACTIVE_TOY', payload: res.toy as ToyType });
             dispatch({ type: 'SET_LLM_STATE', payload: 'PLAYING' });
-          } else if (isMounted) {
+          } else if (isMountedRef.current) {
+             isProcessingRef.current = false;
              dispatch({ type: 'RESET_BOREDOM' });
              dispatch({ type: 'SET_LLM_STATE', payload: 'IDLE' });
           }
         } catch (e) {
           console.error(e);
-          if (isMounted) {
+          if (isMountedRef.current) {
             dispatch({ type: 'RESET_BOREDOM' }); // Prevent rapid-fire retry
             dispatch({ type: 'SET_LLM_STATE', payload: 'IDLE' });
           }
@@ -319,13 +362,13 @@ export function useLLMBrain({
           isProcessingRef.current = false;
         }
       }
-      else if (simState.llmState === 'PLAYING') {
+      else if (state.llmState === 'PLAYING') {
         isProcessingRef.current = true;
         try {
-          const toy = simState.toyState.type;
-          const toyData = JSON.stringify(simState.toyState.data);
-          const lastAction = simState.toyState.lastAction || "None";
-          const lastResult = simState.toyState.lastResult || "Just started playing.";
+          const toy = state.toyState.type;
+          const toyData = JSON.stringify(state.toyState.data);
+          const lastAction = state.toyState.lastAction || "None";
+          const lastResult = state.toyState.lastResult || "Just started playing.";
 
           let availableActions: string[] = [];
           if (toy === 'blocks') availableActions = ['stack', 'balance', 'topple'];
@@ -342,7 +385,7 @@ export function useLLMBrain({
           
           Provide your internal thought process on what to do next, and choose an action.`;
           
-          const response = await ai.models.generateContent({
+          const response = await callWithRetry(() => ai.models.generateContent({
             model: "gemini-3.1-flash-lite-preview",
             contents: prompt,
             config: {
@@ -356,14 +399,12 @@ export function useLLMBrain({
                 required: ["thought", "action"]
               }
             }
-          });
+          }));
           
           const res = JSON.parse(response.text || '{}');
-          if (isMounted && res.action) {
+          if (isMountedRef.current && res.action) {
             dispatch({ type: 'TOY_ACTION', payload: { action: res.action } });
             addThought(res.thought, 'thought');
-            // We use a small timeout to let the reducer update so we can see the result in the next thought if we wanted, 
-            // but for now we just log the action.
             addThought(`[Toy] ${res.action}`, 'action');
             
             // Wait a bit before next move
@@ -378,9 +419,7 @@ export function useLLMBrain({
     };
 
     runAsyncThought();
-
-    return () => { isMounted = false; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [simState.llmState, simState.toyState, addLog, addThought, dispatch, setBrowserState, setNotepad]);
+  }, [simState.llmState, addLog, addThought, dispatch, setBrowserState, setNotepad]);
 
 }
