@@ -3,7 +3,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx } from 'clsx';
-import { GoogleGenAI, Type } from '@google/genai';
 import { 
   Activity, 
   Brain, 
@@ -34,79 +33,34 @@ import {
   ReferenceLine
 } from 'recharts';
 
-// --- Types & Constants ---
-
-type LLMState = 'SLEEPING' | 'IDLE' | 'WAKING' | 'FORAGING' | 'CONSOLIDATING' | 'PLAYING_INIT' | 'PLAYING';
-
-interface SimulationState {
-  time: number;
-  energy: number;
-  freeEnergy: number;
-  boredom: number;
-  llmState: LLMState;
-  lsmNodes: number[];
-}
-
-interface HistoryPoint {
-  time: number;
-  energy: number;
-  freeEnergy: number;
-  boredom: number;
-}
-
-interface LogEntry {
-  id: number;
-  time: number;
-  message: string;
-  type: 'info' | 'alert' | 'action' | 'system';
-}
-
-interface ThoughtEntry {
-  id: number;
-  time: number;
-  text: string;
-  type: 'thought' | 'action';
-}
-
-interface WorldEvent {
-  id: number;
-  time: number;
-  source: 'user' | 'organism';
-  content: string;
-}
-
-const LSM_SIZE = 64; // 8x8 grid
-const MAX_HISTORY = 50;
-const TICK_RATES = {
-  PAUSED: 0,
-  REALTIME: 1000,
-  FAST: 200,
-  TURBO: 50,
-};
-
-// --- Helper Functions ---
-
-const generateInitialLSM = () => Array.from({ length: LSM_SIZE }, () => 0.1);
-
-const clamp = (val: number, min: number, max: number) => Math.min(Math.max(val, min), max);
-
-const TOYS = ['blocks', 'spinner', 'chimes'] as const;
+import { 
+  LLMState, 
+  HistoryPoint, 
+  LogEntry, 
+  ThoughtEntry, 
+  WorldEvent, 
+  TICK_RATES, 
+  MAX_HISTORY, 
+  MAX_LOGS, 
+  MAX_THOUGHTS, 
+  MAX_WORLD_EVENTS,
+  ToyType 
+} from '../lib/simulationEngine';
+import { useSimulationLoop } from '../hooks/useSimulationLoop';
+import { useLLMBrain } from '../hooks/useLLMBrain';
 
 // --- Main Component ---
 
 export default function OrganismSimulation() {
-  // --- State ---
-  const [tickRate, setTickRate] = useState<number>(TICK_RATES.REALTIME);
-  const [isPaused, setIsPaused] = useState(false);
-  
-  const [simState, setSimState] = useState<SimulationState>({
-    time: 0,
-    energy: 80,
-    freeEnergy: 10,
-    boredom: 0,
-    llmState: 'IDLE',
-    lsmNodes: generateInitialLSM(),
-  });
+  const {
+    simState,
+    dispatch,
+    tickRate,
+    setTickRate,
+    isPaused,
+    setIsPaused,
+    tick
+  } = useSimulationLoop(TICK_RATES.REALTIME);
   
   const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -118,7 +72,7 @@ export default function OrganismSimulation() {
   // Virtual World State
   const [notepad, setNotepad] = useState<string[]>([]);
   const [browserState, setBrowserState] = useState<{ active: boolean, query: string, result: string | null }>({ active: false, query: '', result: null });
-  const [activeToy, setActiveToy] = useState<typeof TOYS[number] | null>(null);
+  const [activeTab, setActiveTab] = useState<'logs' | 'memory'>('logs');
 
   const logIdCounter = useRef(0);
   const thoughtIdCounter = useRef(0);
@@ -126,45 +80,50 @@ export default function OrganismSimulation() {
   const thoughtsEndRef = useRef<HTMLDivElement>(null);
   const worldEventsEndRef = useRef<HTMLDivElement>(null);
   const timeRef = useRef(simState.time);
-  
-  const stateRefs = useRef({
-    energy: simState.energy,
-    freeEnergy: simState.freeEnergy,
-    boredom: simState.boredom,
-    notepad,
-    browserState,
-    lastStimulus
-  });
 
   useEffect(() => {
     timeRef.current = simState.time;
-    stateRefs.current = {
-      energy: simState.energy,
-      freeEnergy: simState.freeEnergy,
-      boredom: simState.boredom,
-      notepad,
-      browserState,
-      lastStimulus
-    };
-  }, [simState.time, simState.energy, simState.freeEnergy, simState.boredom, notepad, browserState, lastStimulus]);
+  }, [simState.time]);
 
   // --- Actions ---
+
+  const writeToServerLog = useCallback((data: any) => {
+    fetch('/api/log', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data)
+    }).catch(console.error);
+  }, []);
 
   const addLog = useCallback((message: string, type: LogEntry['type'] = 'info') => {
     setLogs(prev => {
       const newLogs = [...prev, { id: logIdCounter.current++, time: timeRef.current, message, type }];
-      if (newLogs.length > 100) return newLogs.slice(newLogs.length - 100);
+      if (newLogs.length > MAX_LOGS) return newLogs.slice(newLogs.length - MAX_LOGS);
       return newLogs;
     });
-  }, []);
+    writeToServerLog({ category: 'LOG', time: timeRef.current, type, message });
+  }, [writeToServerLog]);
 
   const addThought = useCallback((text: string, type: ThoughtEntry['type'] = 'thought') => {
     setThoughts(prev => {
       const newThoughts = [...prev, { id: thoughtIdCounter.current++, time: timeRef.current, text, type }];
-      if (newThoughts.length > 50) return newThoughts.slice(newThoughts.length - 50);
+      if (newThoughts.length > MAX_THOUGHTS) return newThoughts.slice(newThoughts.length - MAX_THOUGHTS);
       return newThoughts;
     });
-  }, []);
+    writeToServerLog({ category: 'THOUGHT', time: timeRef.current, type, text });
+  }, [writeToServerLog]);
+
+  useLLMBrain({
+    simState,
+    dispatch,
+    addLog,
+    addThought,
+    lastStimulus,
+    notepad,
+    setNotepad,
+    browserState,
+    setBrowserState,
+  });
 
   // Auto-scroll logs
   useEffect(() => {
@@ -179,147 +138,6 @@ export default function OrganismSimulation() {
     worldEventsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [worldEvents]);
 
-  // LLM Async Thoughts
-  useEffect(() => {
-    let isMounted = true;
-
-    const runAsyncThought = async () => {
-      const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY;
-      if (!apiKey) {
-        console.error("Missing Gemini API Key");
-        return;
-      }
-      const ai = new GoogleGenAI({ apiKey });
-      const { energy, freeEnergy, boredom, notepad, lastStimulus, browserState } = stateRefs.current;
-
-      if (simState.llmState === 'WAKING') {
-        setTimeout(() => {
-          if (isMounted) setSimState(prev => ({ ...prev, llmState: 'FORAGING' }));
-        }, 1500);
-      } 
-      else if (simState.llmState === 'FORAGING') {
-        addLog('LLM Active: Initiating Epistemic Foraging.', 'action');
-        setBrowserState({ active: true, query: 'Thinking...', result: null });
-        
-        try {
-          const prompt = `You are a newly born digital organism in a simulated environment. You have no prior knowledge of the real world. 
-          Current state: Energy ${energy.toFixed(1)}%, Uncertainty ${freeEnergy.toFixed(1)}%, Boredom ${boredom.toFixed(1)}%.
-          Last external stimulus: "${lastStimulus || 'None'}".
-          Recent notes: ${notepad.slice(-3).join(' | ') || 'None'}.
-          You are feeling uncertain and need to search the web to understand your environment or the last stimulus.
-          Provide your internal thought process, the search query you type into your browser, and simulate the search result you receive from the web. Keep it concise and alien/naive.`;
-          
-          const response = await ai.models.generateContent({
-            model: "gemini-3-flash-preview",
-            contents: prompt,
-            config: {
-              responseMimeType: "application/json",
-              responseSchema: {
-                type: Type.OBJECT,
-                properties: {
-                  thought: { type: Type.STRING },
-                  query: { type: Type.STRING },
-                  simulatedResult: { type: Type.STRING }
-                },
-                required: ["thought", "query", "simulatedResult"]
-              }
-            }
-          });
-          
-          const res = JSON.parse(response.text || '{}');
-          if (isMounted && res.query) {
-            setBrowserState({ active: true, query: res.query, result: res.simulatedResult });
-            addThought(res.thought, 'thought');
-            addThought(`[Browser] Search: "${res.query}"`, 'action');
-            
-            setTimeout(() => {
-              if (isMounted) setSimState(prev => ({ ...prev, llmState: 'CONSOLIDATING' }));
-            }, 4000);
-          }
-        } catch (e) {
-          console.error(e);
-          if (isMounted) setSimState(prev => ({ ...prev, llmState: 'IDLE' }));
-        }
-      }
-      else if (simState.llmState === 'CONSOLIDATING') {
-        addLog('Uncertainty reduced. Consolidating new priors.', 'info');
-        try {
-          const prompt = `You are a digital organism.
-          You just searched for: "${browserState.query}"
-          And found this result: "${browserState.result}"
-          Provide your internal thought process on what this means to you, and write a short, concise note (max 10 words) to your notepad to remember this concept. Keep it alien and naive.`;
-          
-          const response = await ai.models.generateContent({
-            model: "gemini-3-flash-preview",
-            contents: prompt,
-            config: {
-              responseMimeType: "application/json",
-              responseSchema: {
-                type: Type.OBJECT,
-                properties: {
-                  thought: { type: Type.STRING },
-                  note: { type: Type.STRING }
-                },
-                required: ["thought", "note"]
-              }
-            }
-          });
-          
-          const res = JSON.parse(response.text || '{}');
-          if (isMounted && res.note) {
-            setNotepad(prev => [...prev, res.note]);
-            addThought(res.thought, 'thought');
-            addThought(`[Notepad] Write: "${res.note}"`, 'action');
-            setBrowserState({ active: false, query: '', result: null });
-            setSimState(prev => ({ ...prev, llmState: 'IDLE' }));
-          }
-        } catch (e) {
-          console.error(e);
-          if (isMounted) setSimState(prev => ({ ...prev, llmState: 'IDLE' }));
-        }
-      }
-      else if (simState.llmState === 'PLAYING_INIT') {
-        try {
-          const prompt = `You are a digital organism. You are extremely bored.
-          Available toys: blocks, spinner, chimes.
-          Provide your internal thought process on why you want to play, and choose a toy. Keep it alien and naive.`;
-          
-          const response = await ai.models.generateContent({
-            model: "gemini-3-flash-preview",
-            contents: prompt,
-            config: {
-              responseMimeType: "application/json",
-              responseSchema: {
-                type: Type.OBJECT,
-                properties: {
-                  thought: { type: Type.STRING },
-                  toy: { type: Type.STRING, enum: ["blocks", "spinner", "chimes"] }
-                },
-                required: ["thought", "toy"]
-              }
-            }
-          });
-          
-          const res = JSON.parse(response.text || '{}');
-          if (isMounted && res.toy) {
-            setActiveToy(res.toy as any);
-            addLog(`Boredom threshold reached. Engaging with toy: ${res.toy}`, 'info');
-            addThought(res.thought, 'thought');
-            addThought(`[Toy] Interact with ${res.toy}.`, 'action');
-            setSimState(prev => ({ ...prev, llmState: 'PLAYING' }));
-          }
-        } catch (e) {
-          console.error(e);
-          if (isMounted) setSimState(prev => ({ ...prev, llmState: 'IDLE' }));
-        }
-      }
-    };
-
-    runAsyncThought();
-
-    return () => { isMounted = false; };
-  }, [simState.llmState, addLog, addThought]);
-
   // Initial log
   const hasInitialized = useRef(false);
   useEffect(() => {
@@ -330,87 +148,6 @@ export default function OrganismSimulation() {
       hasInitialized.current = true;
     }
   }, [addLog, addThought]);
-
-  // --- Simulation Loop ---
-
-  const tick = useCallback(() => {
-    setSimState(prev => {
-      const nextTime = prev.time + 1;
-      let nextEnergy = prev.energy;
-      let nextFreeEnergy = prev.freeEnergy;
-      let nextBoredom = prev.boredom;
-      let nextLlmState = prev.llmState;
-      
-      // 1. Update LSM (Liquid State Machine)
-      const noiseLevel = nextFreeEnergy / 100;
-      const nextLsmNodes = prev.lsmNodes.map(val => {
-        const decay = val * 0.9;
-        const noise = (Math.random() - 0.5) * noiseLevel * 0.5;
-        return clamp(decay + noise + (Math.random() * 0.05), 0, 1);
-      });
-
-      // 2. Update Metabolism (Energy)
-      if (prev.llmState === 'SLEEPING') {
-        nextEnergy += 2.0; 
-      } else if (prev.llmState === 'IDLE') {
-        nextEnergy += 0.5; 
-      } else {
-        nextEnergy -= 1.5; 
-      }
-      nextEnergy = clamp(nextEnergy, 0, 100);
-
-      // 3. Update Active Inference (Free Energy & Boredom)
-      if (prev.llmState === 'IDLE') {
-        nextFreeEnergy += 0.5; // Natural drift
-        nextBoredom += 2.0; // Gets bored when doing nothing
-      } else if (prev.llmState === 'FORAGING' || prev.llmState === 'WAKING' || prev.llmState === 'CONSOLIDATING') {
-        nextFreeEnergy -= 10.0; // Rapidly reduce uncertainty while thinking
-        nextBoredom = 0;
-      } else if (prev.llmState === 'PLAYING' || prev.llmState === 'PLAYING_INIT') {
-        nextFreeEnergy += 1.0; // Stimulation increases entropy slightly
-        nextBoredom -= 5.0;
-      } else if (prev.llmState === 'SLEEPING') {
-        nextBoredom = 0;
-      }
-      nextFreeEnergy = clamp(nextFreeEnergy, 0, 100);
-      nextBoredom = clamp(nextBoredom, 0, 100);
-
-      // 4. LLM State Machine Logic & Tool Usage
-      if (nextEnergy < 5 && nextLlmState !== 'SLEEPING') {
-        nextLlmState = 'SLEEPING';
-        addLog('Critical energy. Forcing SLEEP state.', 'alert');
-        addThought('Energy critical. Shutting down.', 'thought');
-        setBrowserState({ active: false, query: '', result: null });
-        setActiveToy(null);
-      } else if (nextLlmState === 'SLEEPING' && nextEnergy > 90) {
-        nextLlmState = 'IDLE';
-        addLog('Energy replenished. Waking to IDLE state.', 'info');
-        addThought('Energy restored. Awaiting input.', 'thought');
-      } else if (nextLlmState === 'IDLE') {
-        if (nextFreeEnergy > 75 && nextEnergy > 30) {
-          nextLlmState = 'WAKING';
-          addLog('High Free Energy detected. Waking Prefrontal Cortex.', 'system');
-          addThought('Uncertainty high. Need input.', 'thought');
-        } else if (nextBoredom > 80 && nextEnergy > 40) {
-          nextLlmState = 'PLAYING_INIT';
-        }
-      } else if (nextLlmState === 'PLAYING' && nextBoredom < 10) {
-        nextLlmState = 'IDLE';
-        setActiveToy(null);
-        addLog('Stimulation sufficient. Returning to IDLE.', 'info');
-        addThought('Curiosity satisfied for now.', 'thought');
-      }
-
-      return {
-        time: nextTime,
-        energy: nextEnergy,
-        freeEnergy: nextFreeEnergy,
-        boredom: nextBoredom,
-        llmState: nextLlmState,
-        lsmNodes: nextLsmNodes,
-      };
-    });
-  }, [addLog, addThought, lastStimulus]);
 
   useEffect(() => {
     setHistory(prev => {
@@ -428,21 +165,11 @@ export default function OrganismSimulation() {
     });
   }, [simState.time, simState.energy, simState.freeEnergy, simState.boredom]);
 
-  // Run loop
-  useEffect(() => {
-    if (isPaused || tickRate === TICK_RATES.PAUSED) return;
-    const interval = setInterval(tick, tickRate);
-    return () => clearInterval(interval);
-  }, [tick, tickRate, isPaused]);
-
   // --- User Interactions ---
 
   const injectSurprise = () => {
-    setSimState(prev => ({
-      ...prev,
-      freeEnergy: clamp(prev.freeEnergy + 60, 0, 100)
-    }));
-    addLog('EXTERNAL INJECTION: Massive sensory anomaly detected. Free Energy spiking!', 'alert');
+    dispatch({ type: 'INJECT_SURPRISE', payload: 60 });
+    addLog('EXTERNAL INJECTION: Massive sensory anomaly detected. Uncertainty spiking!', 'alert');
   };
 
   const handleSendStimulus = (e: React.FormEvent) => {
@@ -451,17 +178,20 @@ export default function OrganismSimulation() {
 
     const stimulus = inputValue.trim();
 
-    setWorldEvents(prev => [...prev, { 
-      id: Date.now(), 
-      time: simState.time, 
-      source: 'user', 
-      content: stimulus 
-    }]);
+    setWorldEvents(prev => {
+      const newEvents = [...prev, { 
+        id: Date.now(), 
+        time: simState.time, 
+        source: 'user' as const, 
+        content: stimulus 
+      }];
+      if (newEvents.length > MAX_WORLD_EVENTS) return newEvents.slice(newEvents.length - MAX_WORLD_EVENTS);
+      return newEvents;
+    });
 
-    setSimState(prev => ({
-      ...prev,
-      freeEnergy: clamp(prev.freeEnergy + 40, 0, 100)
-    }));
+    writeToServerLog({ category: 'WORLD_EVENT', time: simState.time, source: 'user', content: stimulus });
+
+    dispatch({ type: 'INJECT_SURPRISE', payload: 40 });
 
     setLastStimulus(stimulus);
     setInputValue('');
@@ -469,10 +199,7 @@ export default function OrganismSimulation() {
   };
 
   const drainEnergy = () => {
-    setSimState(prev => ({
-      ...prev,
-      energy: clamp(prev.energy - 50, 0, 100)
-    }));
+    dispatch({ type: 'DRAIN_ENERGY', payload: 50 });
     addLog('EXTERNAL INJECTION: Metabolic drain applied.', 'alert');
   };
 
@@ -615,11 +342,16 @@ export default function OrganismSimulation() {
                     {simState.llmState === 'SLEEPING' && "Offline. Conserving metabolic energy."}
                     {simState.llmState === 'IDLE' && "Standby mode. Monitoring limbic signals."}
                     {simState.llmState === 'WAKING' && "Booting context window. Preparing for inference."}
-                    {simState.llmState === 'FORAGING' && "Executing epistemic foraging to reduce Variational Free Energy."}
+                    {simState.llmState === 'FORAGING' && "Executing epistemic foraging to reduce Uncertainty."}
                     {simState.llmState === 'CONSOLIDATING' && "Updating priors and writing to long-term memory."}
                     {simState.llmState === 'PLAYING_INIT' && "Boredom critical. Selecting stimulation strategy."}
                     {simState.llmState === 'PLAYING' && "Engaged in play to reduce boredom."}
                   </p>
+                </div>
+
+                <div className="mt-6 w-full bg-neutral-950 rounded-lg p-3 border border-neutral-800">
+                  <h3 className="text-[10px] uppercase tracking-wider text-neutral-500 mb-1 text-left">Current Linguistic Style</h3>
+                  <p className="text-xs text-indigo-300 italic text-left">"{simState.linguisticStyle}"</p>
                 </div>
               </div>
             </section>
@@ -628,15 +360,15 @@ export default function OrganismSimulation() {
           {/* Middle Row: Active Inference & LSM */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             
-            {/* Active Inference (Free Energy) */}
+            {/* Surprise / Uncertainty */}
             <section className="bg-neutral-900 border border-neutral-800 rounded-xl p-5 relative overflow-hidden">
                <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-rose-500/20 to-rose-500/5" />
               <div className="flex items-center justify-between mb-4">
                 <h2 className="text-sm font-medium text-neutral-300 flex items-center gap-2">
                   <Activity className="w-4 h-4 text-rose-400" />
-                  Active Inference
+                  Surprise / Uncertainty
                 </h2>
-                <span className="text-xs font-mono text-rose-400">{simState.freeEnergy.toFixed(1)} FE</span>
+                <span className="text-xs font-mono text-rose-400">{simState.freeEnergy.toFixed(1)} %</span>
               </div>
               
               <div className="h-[120px] w-full -ml-4">
@@ -659,7 +391,7 @@ export default function OrganismSimulation() {
               
               <div className="mt-4 flex items-center justify-between">
                 <p className="text-xs text-neutral-500 max-w-[200px]">
-                  Minimizing Variational Free Energy (Surprise). Spikes trigger LLM foraging.
+                  Minimizing uncertainty. Spikes trigger LLM foraging.
                 </p>
                 <button 
                   onClick={injectSurprise}
@@ -757,15 +489,25 @@ export default function OrganismSimulation() {
                   <span className="text-[10px] font-mono text-pink-500/80 uppercase">Instruments</span>
                 </div>
                 <div className="p-4 flex items-center justify-around min-h-[80px]">
-                  <div className={clsx("transition-opacity", activeToy === 'blocks' ? 'opacity-100' : 'opacity-30')}>
-                    <motion.div animate={activeToy === 'blocks' ? { y: [-5, 5, -5] } : {}} transition={{ repeat: Infinity, duration: 1 }} className="w-6 h-6 bg-blue-500/50 rounded-sm" />
+                  <div className={clsx("transition-opacity", simState.toyState.type === 'blocks' ? 'opacity-100' : 'opacity-30')}>
+                    <motion.div animate={simState.toyState.type === 'blocks' ? { y: [-5, 5, -5] } : {}} transition={{ repeat: Infinity, duration: 1 }} className="w-6 h-6 bg-blue-500/50 rounded-sm" />
                   </div>
-                  <div className={clsx("transition-opacity", activeToy === 'spinner' ? 'opacity-100' : 'opacity-30')}>
-                    <motion.div animate={activeToy === 'spinner' ? { rotate: 360 } : {}} transition={{ repeat: Infinity, duration: 0.5, ease: "linear" }} className="w-6 h-6 border-4 border-emerald-500/50 rounded-full border-t-transparent" />
+                  <div className={clsx("transition-opacity", simState.toyState.type === 'spinner' ? 'opacity-100' : 'opacity-30')}>
+                    <motion.div animate={simState.toyState.type === 'spinner' ? { rotate: 360 } : {}} transition={{ repeat: Infinity, duration: 0.5, ease: "linear" }} className="w-6 h-6 border-4 border-emerald-500/50 rounded-full border-t-transparent" />
                   </div>
-                  <div className={clsx("transition-opacity", activeToy === 'chimes' ? 'opacity-100' : 'opacity-30')}>
-                    <motion.div animate={activeToy === 'chimes' ? { scale: [1, 1.2, 1] } : {}} transition={{ repeat: Infinity, duration: 0.8 }} className="w-6 h-6 bg-purple-500/50 rounded-full" />
+                  <div className={clsx("transition-opacity", simState.toyState.type === 'chimes' ? 'opacity-100' : 'opacity-30')}>
+                    <motion.div animate={simState.toyState.type === 'chimes' ? { scale: [1, 1.2, 1] } : {}} transition={{ repeat: Infinity, duration: 0.8 }} className="w-6 h-6 bg-purple-500/50 rounded-full" />
                   </div>
+                </div>
+                <div className="px-4 pb-4 text-[10px] font-mono text-neutral-500 text-center">
+                  {simState.toyState.type ? (
+                    <div className="flex flex-col gap-1">
+                      <div className="text-pink-400/80 uppercase tracking-widest">{simState.toyState.type}</div>
+                      <div className="text-neutral-400 italic">"{simState.toyState.lastResult || 'Initializing...'}"</div>
+                    </div>
+                  ) : (
+                    <div className="opacity-50 italic">No active instrument.</div>
+                  )}
                 </div>
               </div>
 
@@ -825,35 +567,82 @@ export default function OrganismSimulation() {
             </div>
           </section>
 
-          {/* System Event Log */}
-          <section className="bg-neutral-900 border border-neutral-800 rounded-xl flex flex-col flex-1 min-h-[250px] overflow-hidden">
-            <div className="p-3 border-b border-neutral-800 bg-neutral-950/50 flex items-center gap-2">
-              <Terminal className="w-4 h-4 text-neutral-400" />
-              <h2 className="text-xs font-mono text-neutral-400 uppercase tracking-wider">System Event Log</h2>
+          {/* System Event Log & Memory */}
+          <section className="bg-neutral-900 border border-neutral-800 rounded-xl flex flex-col flex-1 min-h-[300px] overflow-hidden">
+            <div className="flex border-b border-neutral-800 bg-neutral-950/50">
+              <button 
+                onClick={() => setActiveTab('logs')}
+                className={clsx(
+                  "flex-1 py-3 text-[10px] font-bold uppercase tracking-widest transition-colors flex items-center justify-center gap-2",
+                  activeTab === 'logs' ? "text-indigo-400 bg-indigo-500/5" : "text-neutral-500 hover:text-neutral-300"
+                )}
+              >
+                <Terminal className="w-3 h-3" />
+                System Logs
+              </button>
+              <button 
+                onClick={() => setActiveTab('memory')}
+                className={clsx(
+                  "flex-1 py-3 text-[10px] font-bold uppercase tracking-widest transition-colors border-l border-neutral-800 flex items-center justify-center gap-2",
+                  activeTab === 'memory' ? "text-indigo-400 bg-indigo-500/5" : "text-neutral-500 hover:text-neutral-300"
+                )}
+              >
+                <Database className="w-3 h-3" />
+                Episodic Memory
+              </button>
             </div>
             
-            <div className="flex-1 overflow-y-auto p-4 font-mono text-xs space-y-3">
-              <AnimatePresence initial={false}>
-                {logs.map((log) => (
-                  <motion.div 
-                    key={log.id}
-                    initial={{ opacity: 0, x: -10 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    className="flex gap-3"
-                  >
-                    <span className="text-neutral-600 shrink-0">[{log.time.toString().padStart(4, '0')}]</span>
-                    <span className={clsx(
-                      log.type === 'system' && 'text-neutral-400',
-                      log.type === 'info' && 'text-blue-400',
-                      log.type === 'action' && 'text-emerald-400',
-                      log.type === 'alert' && 'text-rose-400',
-                    )}>
-                      {log.message}
-                    </span>
-                  </motion.div>
-                ))}
-              </AnimatePresence>
-              <div ref={logsEndRef} />
+            <div className="flex-1 overflow-y-auto p-4 font-mono text-xs">
+              {activeTab === 'logs' ? (
+                <div className="space-y-3">
+                  <AnimatePresence initial={false}>
+                    {logs.map((log) => (
+                      <motion.div 
+                        key={log.id}
+                        initial={{ opacity: 0, x: -10 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        className="flex gap-3"
+                      >
+                        <span className="text-neutral-600 shrink-0">[{log.time.toString().padStart(4, '0')}]</span>
+                        <span className={clsx(
+                          log.type === 'system' && 'text-neutral-400',
+                          log.type === 'info' && 'text-blue-400',
+                          log.type === 'action' && 'text-emerald-400',
+                          log.type === 'alert' && 'text-rose-400',
+                        )}>
+                          {log.message}
+                        </span>
+                      </motion.div>
+                    ))}
+                  </AnimatePresence>
+                  <div ref={logsEndRef} />
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {simState.episodicMemory.length === 0 ? (
+                    <p className="text-neutral-600 italic text-center py-8">No significant experiences recorded.</p>
+                  ) : (
+                    simState.episodicMemory.map((memory) => (
+                      <div key={memory.id} className="bg-neutral-950 border border-neutral-800 p-3 rounded-lg">
+                        <div className="flex justify-between text-[9px] text-neutral-600 mb-2 font-bold uppercase tracking-tighter">
+                          <span>Experience Log</span>
+                          <span>T={memory.time}</span>
+                        </div>
+                        <div className="space-y-2">
+                          <div>
+                            <span className="text-neutral-600 uppercase text-[9px] block mb-0.5">Stimulus</span>
+                            <p className="text-neutral-400">{memory.stimulus}</p>
+                          </div>
+                          <div>
+                            <span className="text-neutral-600 uppercase text-[9px] block mb-0.5">Outcome</span>
+                            <p className="text-indigo-300">{memory.outcome}</p>
+                          </div>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
             </div>
           </section>
         </div>
