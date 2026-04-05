@@ -1,0 +1,5 @@
+{
+  "name": "Synthetic Organism Architecture",
+  "description": "A virtual organism simulation featuring a modular cognitive architecture with Active Inference, a Liquid State Machine, and an LLM-powered prefrontal cortex that interacts with a virtual world.",
+  "requestFramePermissions": []
+}
