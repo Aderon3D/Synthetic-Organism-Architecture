@@ -13,6 +13,7 @@ interface UseLLMBrainProps {
   dispatch: React.Dispatch<any>;
   addLog: (message: string, type?: 'info' | 'alert' | 'action' | 'system') => void;
   addThought: (text: string, type?: 'thought' | 'action') => void;
+  addEpisodicMemory: (memory: Omit<import('../lib/simulationEngine').EpisodicMemory, 'id'>) => void;
   lastStimulus: string;
   notepad: string[];
   setNotepad: React.Dispatch<React.SetStateAction<string[]>>;

@@ -15,6 +15,7 @@ import {
   SpinnerData,
   ChimesData
 } from '../lib/simulationEngine';
+import { stepActiveInference } from '../lib/activeInference';
 
 type SimulationAction = 
   | { type: 'TICK'; payload: { timestamp: number } }
@@ -30,30 +31,16 @@ type SimulationAction =
   | { type: 'TOY_ACTION', payload: { action: string } }
   | { type: 'SET_LINGUISTIC_STYLE', payload: string }
   | { type: 'ADD_EPISODIC_MEMORY', payload: Omit<EpisodicMemory, 'id'> }
-  | { type: 'SET_EPISODIC_MEMORY', payload: EpisodicMemory[] };
+  | { type: 'SET_EPISODIC_MEMORY', payload: EpisodicMemory[] }
+  | { type: 'SET_OBSERVATION', payload: number };
 
-interface SimulationState {
-  time: number;
+// We extend the imported SimulationState with local fields
+interface LocalSimulationState extends SimulationState {
   lastTickTime: number;
-  energy: number;
-  freeEnergy: number;
-  boredom: number;
-  llmState: LLMState;
-  lsmNodes: number[];
   activeToy: ToyType | null;
-  toyState: {
-    type: ToyType | null;
-    data: any;
-    lastAction: string | null;
-    lastResult: string | null;
-  };
-  episodicMemory: EpisodicMemory[];
-  wakingReason: string | null;
-  prediction: string | null;
-  linguisticStyle: string;
 }
 
-function simulationReducer(state: SimulationState, action: SimulationAction): SimulationState {
+function simulationReducer(state: LocalSimulationState, action: SimulationAction): LocalSimulationState {
   switch (action.type) {
     case 'TICK': {
       const lastTime = state.lastTickTime === 0 ? action.payload.timestamp - 100 : state.lastTickTime;
@@ -72,17 +59,43 @@ function simulationReducer(state: SimulationState, action: SimulationAction): Si
       // 2. Update Metabolism
       const nextEnergy = calculateNextMetabolism(state.energy, state.llmState, dt);
 
-      // 3. Update Active Inference
-      const { freeEnergy: nextFreeEnergy, boredom: nextBoredom } = calculateNextActiveInference(state.freeEnergy, state.boredom, state.llmState, dt);
+      // 3. Update Active Inference (POMDP)
+      // Determine observation based on current state
+      let observation = 0; // Boring
+      if (state.wakingReason === 'USER_STIMULUS') {
+        observation = 2; // Surprising
+      } else if (state.toyState.type !== null) {
+        observation = 1; // Expected/Playful
+      }
 
-      // 4. Spontaneity Check: High LSM activity + IDLE state can trigger spontaneous thought
+      const aiResult = stepActiveInference(state.beliefState, observation, state.activeInferenceAction);
+      
+      // Map POMDP action to LLM State if we are not already busy
       let nextLlmState = state.llmState;
       let nextWakingReason = state.wakingReason;
-      
-      if (state.llmState === 'IDLE' && lsmActivity > 0.4 && Math.random() < 0.05) {
+
+      if (state.llmState === 'IDLE' || state.llmState === 'SLEEPING') {
+        if (aiResult.action === 1) {
+          nextLlmState = 'FORAGING';
+          nextWakingReason = 'EPISTEMIC_FORAGING';
+        } else if (aiResult.action === 2) {
+          nextLlmState = 'PLAYING_INIT';
+          nextWakingReason = 'PRAGMATIC_PLAY';
+        }
+      }
+
+      // 4. Spontaneity Check: High LSM activity + IDLE state can trigger spontaneous thought
+      if (nextLlmState === 'IDLE' && lsmActivity > 0.4 && Math.random() < 0.05) {
         nextLlmState = 'SPONTANEOUS_THOUGHT';
         nextWakingReason = 'LSM_RESONANCE';
       }
+
+      // Map VFE to freeEnergy for UI compatibility (scale 0-100)
+      // VFE is usually small (e.g. 0 to 2), so we scale it up
+      const nextFreeEnergy = clamp(aiResult.vfe * 50, 0, 100);
+      
+      // Boredom still drifts based on old logic for now, or we can tie it to EFE
+      const { boredom: nextBoredom } = calculateNextActiveInference(state.freeEnergy, state.boredom, state.llmState, dt);
 
       // 5. Update Toy State (Natural Decay)
       let nextToyState = { ...state.toyState };
@@ -106,7 +119,12 @@ function simulationReducer(state: SimulationState, action: SimulationAction): Si
         llmState: nextLlmState,
         wakingReason: nextWakingReason,
         lsmNodes: nextLsmNodes,
-        toyState: nextToyState
+        toyState: nextToyState,
+        beliefState: aiResult.posterior,
+        vfe: aiResult.vfe,
+        efe: aiResult.efe,
+        activeInferenceAction: aiResult.action,
+        currentObservation: observation
       };
     }
     case 'INJECT_SENSORY': {
@@ -238,6 +256,8 @@ function simulationReducer(state: SimulationState, action: SimulationAction): Si
         ...state,
         episodicMemory: action.payload
       };
+    case 'SET_OBSERVATION':
+      return { ...state, currentObservation: action.payload };
     default:
       return state;
   }
@@ -259,12 +279,18 @@ export function useSimulationLoop(initialTickRate: number = TICK_RATES.REALTIME)
     lsmNodes: generateInitialLSM(),
     linguisticStyle: 'Literal, computational, naive',
     episodicMemory: [],
+    activeToy: null,
     toyState: {
       type: null,
       data: null,
       lastAction: null,
       lastResult: null
-    }
+    },
+    beliefState: [0.5, 0.5],
+    vfe: 0,
+    efe: [0, 0, 0],
+    activeInferenceAction: 0,
+    currentObservation: 0
   });
 
   const tick = useCallback(() => {

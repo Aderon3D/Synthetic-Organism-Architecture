@@ -33,7 +33,7 @@ export interface ToyState {
 export interface SimulationState {
   time: number;
   energy: number;
-  freeEnergy: number;
+  freeEnergy: number; // For UI compatibility, maps to VFE
   boredom: number;
   llmState: LLMState;
   wakingReason: string | null;
@@ -42,6 +42,12 @@ export interface SimulationState {
   linguisticStyle: string;
   episodicMemory: EpisodicMemory[];
   toyState: ToyState;
+  // Active Inference (POMDP) State
+  beliefState: number[];
+  vfe: number;
+  efe: number[];
+  activeInferenceAction: number;
+  currentObservation: number;
 }
 
 export interface HistoryPoint {

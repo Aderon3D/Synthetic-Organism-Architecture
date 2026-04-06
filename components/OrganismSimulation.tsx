@@ -47,7 +47,9 @@ import {
   MAX_LOGS, 
   MAX_THOUGHTS, 
   MAX_WORLD_EVENTS,
-  ToyType 
+  ToyType,
+  EpisodicMemory,
+  clamp
 } from '../lib/simulationEngine';
 import { useSimulationLoop } from '../hooks/useSimulationLoop';
 import { useLLMBrain } from '../hooks/useLLMBrain';
@@ -127,6 +129,7 @@ export default function OrganismSimulation() {
           id: data.id,
           time: data.time,
           stimulus: data.stimulus,
+          thought: data.thought || '',
           outcome: data.outcome
         });
       });
@@ -311,21 +314,9 @@ export default function OrganismSimulation() {
     writeToServerLog({ category: 'WORLD_EVENT', time: simState.time, source: 'user', content: stimulus });
 
     // Calculate Surprise (Active Inference)
-    // If stimulus doesn't match prediction, spike Free Energy
-    let surprise = 30;
-    if (simState.prediction) {
-      const pred = simState.prediction.toLowerCase();
-      const stim = stimulus.toLowerCase();
-      if (pred.includes(stim) || stim.includes(pred)) {
-        surprise = 5; // Predicted correctly!
-        addLog('Inference confirmed. Surprise minimal.', 'info');
-      } else {
-        surprise = 60; // Prediction failed
-        addLog('Prediction error! High surprise detected.', 'alert');
-      }
-    }
-
-    dispatch({ type: 'INJECT_SURPRISE', payload: surprise });
+    // If stimulus doesn't match prediction, spike Free Energy (Now handled by POMDP)
+    // We inject observation = 2 (Surprising) via waking reason
+    dispatch({ type: 'SET_WAKING_REASON', payload: 'USER_STIMULUS' });
     dispatch({ type: 'INJECT_SENSORY', payload: { row: 0, value: 0.8 } }); // Ripple from top
 
     setLastStimulus(stimulus);
@@ -515,59 +506,78 @@ export default function OrganismSimulation() {
           {/* Middle Row: Active Inference & LSM */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             
-            {/* Surprise / Uncertainty */}
-            <section className="bg-neutral-900 border border-neutral-800 rounded-xl p-5 relative overflow-hidden">
-               <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-rose-500/20 to-rose-500/5" />
-              <div className="flex items-center justify-between mb-4">
-                <h2 className="text-sm font-medium text-neutral-300 flex items-center gap-2">
-                  <Activity className="w-4 h-4 text-rose-400" />
-                  Surprise / Uncertainty
-                </h2>
-                <span className="text-xs font-mono text-rose-400">{simState.freeEnergy.toFixed(1)} %</span>
-              </div>
+            {/* Active Inference (POMDP) Panel */}
+            <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-5 relative overflow-hidden">
+              <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-rose-500/20 to-rose-500/5" />
+              <h3 className="text-sm font-medium text-neutral-300 mb-4 flex items-center gap-2">
+                <Activity className="w-4 h-4 text-rose-400" />
+                Generative Model (POMDP)
+              </h3>
               
-              <AnimatePresence>
-                {simState.freeEnergy > 75 && (
-                  <motion.div 
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: [0, 0.2, 0] }}
-                    transition={{ repeat: Infinity, duration: 1 }}
-                    className="absolute inset-0 bg-rose-500 pointer-events-none"
-                  />
-                )}
-              </AnimatePresence>
-              
-              <div className="h-[120px] w-full -ml-4">
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={history}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#262626" vertical={false} />
-                    <YAxis domain={[0, 100]} hide />
-                    <ReferenceLine y={75} stroke="#ef4444" strokeDasharray="3 3" strokeOpacity={0.5} />
-                    <Line 
-                      type="monotone" 
-                      dataKey="freeEnergy" 
-                      stroke="#fb7185" 
-                      strokeWidth={2} 
-                      dot={false} 
-                      isAnimationActive={false}
+              <div className="space-y-4">
+                {/* Belief State */}
+                <div>
+                  <div className="flex justify-between text-xs mb-1">
+                    <span className="text-neutral-500">Belief State Q(s)</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    <div className="bg-neutral-950 border border-neutral-800 rounded p-2 flex justify-between items-center">
+                      <span className="text-neutral-400">Safe/Known</span>
+                      <span className="font-mono text-emerald-400">{(simState.beliefState[0] * 100).toFixed(1)}%</span>
+                    </div>
+                    <div className="bg-neutral-950 border border-neutral-800 rounded p-2 flex justify-between items-center">
+                      <span className="text-neutral-400">Volatile/Novel</span>
+                      <span className="font-mono text-amber-400">{(simState.beliefState[1] * 100).toFixed(1)}%</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Expected Free Energy (EFE) */}
+                <div>
+                  <div className="flex justify-between text-xs mb-1">
+                    <span className="text-neutral-500">Expected Free Energy (Policies)</span>
+                  </div>
+                  <div className="space-y-1">
+                    {['Rest (Idle)', 'Explore (Forage)', 'Exploit (Play)'].map((policy, idx) => (
+                      <div key={idx} className="bg-neutral-950 border border-neutral-800 rounded px-2 py-1.5 flex justify-between items-center text-xs">
+                        <span className={simState.activeInferenceAction === idx ? 'text-indigo-400 font-medium' : 'text-neutral-400'}>
+                          {policy} {simState.activeInferenceAction === idx && '◀'}
+                        </span>
+                        <span className="font-mono text-neutral-300">{simState.efe[idx].toFixed(3)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Current VFE */}
+                <div>
+                  <div className="flex justify-between text-xs mb-1">
+                    <span className="text-neutral-500">Variational Free Energy (Surprise)</span>
+                    <span className="font-mono text-rose-400">{simState.vfe.toFixed(3)}</span>
+                  </div>
+                  <div className="h-1.5 bg-neutral-950 rounded-full overflow-hidden">
+                    <motion.div 
+                      className="h-full bg-rose-500"
+                      animate={{ width: `${clamp(simState.vfe * 50, 0, 100)}%` }}
+                      transition={{ type: 'spring', bounce: 0, duration: 0.5 }}
                     />
-                  </LineChart>
-                </ResponsiveContainer>
+                  </div>
+                </div>
+                
+                <div className="mt-4 flex items-center justify-between">
+                  <p className="text-xs text-neutral-500 max-w-[200px]">
+                    Minimizing uncertainty. High VFE drives epistemic foraging.
+                  </p>
+                  <button 
+                    onClick={injectSurprise}
+                    className="flex items-center gap-1 text-xs px-3 py-1.5 bg-rose-500/10 border border-rose-500/20 hover:bg-rose-500/20 text-rose-400 rounded-md transition-colors"
+                  >
+                    <AlertTriangle className="w-3 h-3" />
+                    Inject Surprise
+                  </button>
+                </div>
               </div>
-              
-              <div className="mt-4 flex items-center justify-between">
-                <p className="text-xs text-neutral-500 max-w-[200px]">
-                  Minimizing uncertainty. Spikes trigger LLM foraging.
-                </p>
-                <button 
-                  onClick={injectSurprise}
-                  className="flex items-center gap-1 text-xs px-3 py-1.5 bg-rose-500/10 border border-rose-500/20 hover:bg-rose-500/20 text-rose-400 rounded-md transition-colors"
-                >
-                  <AlertTriangle className="w-3 h-3" />
-                  Inject Surprise
-                </button>
-              </div>
-            </section>
+            </div>
 
             {/* Liquid State Machine */}
             <section className="bg-neutral-900 border border-neutral-800 rounded-xl p-5 relative overflow-hidden">
