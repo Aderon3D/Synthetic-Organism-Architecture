@@ -520,14 +520,18 @@ export default function OrganismSimulation() {
                   <div className="flex justify-between text-xs mb-1">
                     <span className="text-neutral-500">Belief State Q(s)</span>
                   </div>
-                  <div className="grid grid-cols-2 gap-2 text-xs">
-                    <div className="bg-neutral-950 border border-neutral-800 rounded p-2 flex justify-between items-center">
-                      <span className="text-neutral-400">Safe/Known</span>
+                  <div className="grid grid-cols-3 gap-2 text-xs">
+                    <div className="bg-neutral-950 border border-neutral-800 rounded p-2 flex flex-col justify-center items-center">
+                      <span className="text-neutral-400 text-[10px] mb-1">Safe/Boring</span>
                       <span className="font-mono text-emerald-400">{(simState.beliefState[0] * 100).toFixed(1)}%</span>
                     </div>
-                    <div className="bg-neutral-950 border border-neutral-800 rounded p-2 flex justify-between items-center">
-                      <span className="text-neutral-400">Volatile/Novel</span>
-                      <span className="font-mono text-amber-400">{(simState.beliefState[1] * 100).toFixed(1)}%</span>
+                    <div className="bg-neutral-950 border border-neutral-800 rounded p-2 flex flex-col justify-center items-center">
+                      <span className="text-neutral-400 text-[10px] mb-1">Engaged/Play</span>
+                      <span className="font-mono text-indigo-400">{(simState.beliefState[1] * 100).toFixed(1)}%</span>
+                    </div>
+                    <div className="bg-neutral-950 border border-neutral-800 rounded p-2 flex flex-col justify-center items-center">
+                      <span className="text-neutral-400 text-[10px] mb-1">Volatile/Surprise</span>
+                      <span className="font-mono text-amber-400">{(simState.beliefState[2] * 100).toFixed(1)}%</span>
                     </div>
                   </div>
                 </div>

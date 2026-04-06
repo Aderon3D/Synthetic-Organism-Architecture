@@ -48,6 +48,8 @@ export interface SimulationState {
   efe: number[];
   activeInferenceAction: number;
   currentObservation: number;
+  actionConfidence: number;
+  ticksSinceLastLlmCall: number;
 }
 
 export interface HistoryPoint {

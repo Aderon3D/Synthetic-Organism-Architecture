@@ -97,16 +97,6 @@ export function useLLMBrain({
       dispatch({ type: 'SET_LLM_STATE', payload: 'IDLE' });
       addLog('Energy replenished. Waking to IDLE state.', 'info');
       addThought('Energy restored. Awaiting input.', 'thought');
-    } else if (simState.llmState === 'IDLE') {
-      if (simState.freeEnergy > 75 && simState.energy > 30) {
-        dispatch({ type: 'SET_WAKING_REASON', payload: 'HIGH_UNCERTAINTY' });
-        dispatch({ type: 'SET_LLM_STATE', payload: 'WAKING' });
-        addLog('High Free Energy detected. Waking Prefrontal Cortex.', 'system');
-        addThought('Uncertainty high. Need input.', 'thought');
-      } else if (simState.boredom > 80 && simState.energy > 40) {
-        dispatch({ type: 'SET_WAKING_REASON', payload: 'HIGH_BOREDOM' });
-        dispatch({ type: 'SET_LLM_STATE', payload: 'PLAYING_INIT' });
-      }
     } else if (simState.llmState === 'PLAYING' && simState.boredom < 10) {
       dispatch({ type: 'SET_LLM_STATE', payload: 'IDLE' });
       dispatch({ type: 'SET_ACTIVE_TOY', payload: null });
@@ -392,6 +382,63 @@ export function useLLMBrain({
           isProcessingRef.current = false;
         }
       }
+      else if (state.llmState === 'SPONTANEOUS_THOUGHT') {
+        isProcessingRef.current = true;
+        addLog('LSM Resonance triggered spontaneous thought.', 'info');
+        
+        try {
+          const prompt = `${persona}
+          Current state: Energy ${state.energy.toFixed(1)}%, Uncertainty ${state.freeEnergy.toFixed(1)}%, Boredom ${state.boredom.toFixed(1)}%.
+          ${lsmContext}
+          
+          [DUAL MEMORY SYSTEM]
+          1. Working Memory (Recent Facts): ${workingMemory}
+          2. Episodic Memory (Past Experiences): 
+          ${episodicMemory}
+
+          Task: You are having a spontaneous, unprompted thought driven by internal resonance.
+          Generate a short, fragmentary, introspective thought. It should not be a complete narrative, but a fleeting connection between your current state, memories, and sensory noise.
+          Also, suggest a slight drift in your "linguistic style" based on this thought (e.g., becoming more poetic, more analytical, more anxious).`;
+          
+          const response = await callWithRetry(() => ai.models.generateContent({
+            model: "gemini-3.1-flash-lite-preview",
+            contents: prompt,
+            config: {
+              responseMimeType: "application/json",
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  thought: { type: Type.STRING, description: "A short, fragmentary, introspective thought." },
+                  newStyle: { type: Type.STRING, description: "A slight evolution of your linguistic style." }
+                },
+                required: ["thought", "newStyle"]
+              }
+            }
+          }));
+          
+          const res = JSON.parse(response.text || '{}');
+          if (isMountedRef.current && res.thought) {
+            addThought(res.thought, 'thought');
+            dispatch({ type: 'SET_LINGUISTIC_STYLE', payload: res.newStyle });
+            
+            // Return to IDLE after a short delay
+            setTimeout(() => {
+              if (isMountedRef.current) {
+                dispatch({ type: 'SET_LLM_STATE', payload: 'IDLE' });
+              }
+            }, 2000);
+          } else {
+             if (isMountedRef.current) dispatch({ type: 'SET_LLM_STATE', payload: 'IDLE' });
+          }
+        } catch (e) {
+          console.error(e);
+          if (isMountedRef.current) {
+            dispatch({ type: 'SET_LLM_STATE', payload: 'IDLE' });
+          }
+        } finally {
+          isProcessingRef.current = false;
+        }
+      }
       else if (state.llmState === 'PLAYING') {
         isProcessingRef.current = true;
         try {
@@ -446,61 +493,6 @@ export function useLLMBrain({
           }
         } catch (e) {
           console.error(e);
-        } finally {
-          isProcessingRef.current = false;
-        }
-      }
-      else if (state.llmState === 'SPONTANEOUS_THOUGHT') {
-        isProcessingRef.current = true;
-        try {
-          const prompt = `${persona}
-          Current state: Energy ${state.energy.toFixed(1)}%, Uncertainty ${state.freeEnergy.toFixed(1)}%, Boredom ${state.boredom.toFixed(1)}%.
-          ${lsmContext}
-          
-          Task: You are experiencing a spontaneous burst of cognitive activity (LSM resonance). 
-          You are not reacting to an external stimulus, but to your own internal state.
-          Provide your internal thought process. What are you thinking about? 
-          Choose a sub-goal: either search the web for something you're curious about, or decide to play with a toy.`;
-          
-          const response = await callWithRetry(() => ai.models.generateContent({
-            model: "gemini-3.1-flash-lite-preview",
-            contents: prompt,
-            config: {
-              responseMimeType: "application/json",
-              responseSchema: {
-                type: Type.OBJECT,
-                properties: {
-                  thought: { type: Type.STRING },
-                  decision: { type: Type.STRING, enum: ["FORAGE", "PLAY"] },
-                  query: { type: Type.STRING, description: "If decision is FORAGE, what is the query?" },
-                  toy: { type: Type.STRING, enum: ["blocks", "spinner", "chimes"], description: "If decision is PLAY, which toy?" }
-                },
-                required: ["thought", "decision"]
-              }
-            }
-          }));
-          
-          const res = JSON.parse(response.text || '{}');
-          if (isMountedRef.current) {
-            addThought(res.thought, 'thought');
-            addLog(`Spontaneous thought: ${res.thought.slice(0, 50)}...`, 'info');
-            
-            if (res.decision === 'FORAGE' && res.query) {
-              setBrowserState({ active: true, query: res.query, result: null });
-              dispatch({ type: 'SET_LLM_STATE', payload: 'FORAGING' });
-            } else if (res.decision === 'PLAY' && res.toy) {
-              dispatch({ type: 'SET_ACTIVE_TOY', payload: res.toy as ToyType });
-              dispatch({ type: 'SET_LLM_STATE', payload: 'PLAYING' });
-            } else {
-              dispatch({ type: 'SET_LLM_STATE', payload: 'IDLE' });
-            }
-          }
-        } catch (e) {
-          console.error(e);
-          if (isMountedRef.current) {
-            dispatch({ type: 'RESET_FREE_ENERGY' });
-            dispatch({ type: 'SET_LLM_STATE', payload: 'IDLE' });
-          }
         } finally {
           isProcessingRef.current = false;
         }

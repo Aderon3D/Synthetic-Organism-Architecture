@@ -60,21 +60,45 @@ function simulationReducer(state: LocalSimulationState, action: SimulationAction
       const nextEnergy = calculateNextMetabolism(state.energy, state.llmState, dt);
 
       // 3. Update Active Inference (POMDP)
-      // Determine observation based on current state
+      // Derive observation from continuous signals
       let observation = 0; // Boring
+      const energyDelta = nextEnergy - state.energy;
+      
+      let isToyActive = false;
+      if (state.toyState.type === 'spinner' && state.toyState.data && (state.toyState.data as SpinnerData).rpm > 10) isToyActive = true;
+      if (state.toyState.type === 'chimes' && state.toyState.data && (state.toyState.data as ChimesData).resonance > 10) isToyActive = true;
+      if (state.toyState.type === 'blocks' && state.toyState.data && (state.toyState.data as BlocksData).height > 0) isToyActive = true;
+
       if (state.wakingReason === 'USER_STIMULUS') {
         observation = 2; // Surprising
-      } else if (state.toyState.type !== null) {
-        observation = 1; // Expected/Playful
+      } else if (Math.abs(energyDelta) > 5) {
+        observation = 2; // Surprising (sudden energy change)
+      } else if (isToyActive || lsmActivity > 0.6) {
+        observation = 1; // Expected/Playful (high activity or playing)
       }
 
-      const aiResult = stepActiveInference(state.beliefState, observation, state.activeInferenceAction);
+      const aiResult = stepActiveInference(
+        state.beliefState, 
+        observation, 
+        state.activeInferenceAction,
+        state.boredom
+      );
       
-      // Map POMDP action to LLM State if we are not already busy
+      // Track action confidence and cooldown
+      const isSameAction = aiResult.action === state.activeInferenceAction;
+      const nextActionConfidence = isSameAction ? state.actionConfidence + 1 : 0;
+      const nextTicksSinceLastLlmCall = state.llmState !== 'IDLE' ? 0 : state.ticksSinceLastLlmCall + 1;
+      
+      // Map POMDP action to LLM State with gating
       let nextLlmState = state.llmState;
       let nextWakingReason = state.wakingReason;
 
-      if (state.llmState === 'IDLE' || state.llmState === 'SLEEPING') {
+      // Only allow POMDP to wake the LLM if:
+      // 1. It's IDLE (not SLEEPING or already busy)
+      // 2. The POMDP has recommended the same action for 5 consecutive ticks (confidence)
+      // 3. A cooldown of 20 ticks has passed since the last LLM activity
+      // 4. Energy is sufficient
+      if (state.llmState === 'IDLE' && nextActionConfidence > 5 && nextTicksSinceLastLlmCall > 20 && nextEnergy > 30) {
         if (aiResult.action === 1) {
           nextLlmState = 'FORAGING';
           nextWakingReason = 'EPISTEMIC_FORAGING';
@@ -85,7 +109,7 @@ function simulationReducer(state: LocalSimulationState, action: SimulationAction
       }
 
       // 4. Spontaneity Check: High LSM activity + IDLE state can trigger spontaneous thought
-      if (nextLlmState === 'IDLE' && lsmActivity > 0.4 && Math.random() < 0.05) {
+      if (nextLlmState === 'IDLE' && lsmActivity > 0.4 && Math.random() < 0.05 && nextTicksSinceLastLlmCall > 20) {
         nextLlmState = 'SPONTANEOUS_THOUGHT';
         nextWakingReason = 'LSM_RESONANCE';
       }
@@ -94,7 +118,7 @@ function simulationReducer(state: LocalSimulationState, action: SimulationAction
       // VFE is usually small (e.g. 0 to 2), so we scale it up
       const nextFreeEnergy = clamp(aiResult.vfe * 50, 0, 100);
       
-      // Boredom still drifts based on old logic for now, or we can tie it to EFE
+      // Use ODE for boredom so it can satiate during play
       const { boredom: nextBoredom } = calculateNextActiveInference(state.freeEnergy, state.boredom, state.llmState, dt);
 
       // 5. Update Toy State (Natural Decay)
@@ -124,7 +148,9 @@ function simulationReducer(state: LocalSimulationState, action: SimulationAction
         vfe: aiResult.vfe,
         efe: aiResult.efe,
         activeInferenceAction: aiResult.action,
-        currentObservation: observation
+        currentObservation: observation,
+        actionConfidence: nextActionConfidence,
+        ticksSinceLastLlmCall: nextTicksSinceLastLlmCall
       };
     }
     case 'INJECT_SENSORY': {
@@ -286,11 +312,13 @@ export function useSimulationLoop(initialTickRate: number = TICK_RATES.REALTIME)
       lastAction: null,
       lastResult: null
     },
-    beliefState: [0.5, 0.5],
+    beliefState: [0.33, 0.33, 0.34],
     vfe: 0,
     efe: [0, 0, 0],
     activeInferenceAction: 0,
-    currentObservation: 0
+    currentObservation: 0,
+    actionConfidence: 0,
+    ticksSinceLastLlmCall: 0
   });
 
   const tick = useCallback(() => {
