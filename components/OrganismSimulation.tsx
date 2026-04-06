@@ -32,6 +32,9 @@ import {
   ResponsiveContainer,
   ReferenceLine
 } from 'recharts';
+import { signInWithPopup, GoogleAuthProvider, onAuthStateChanged, User } from 'firebase/auth';
+import { collection, doc, setDoc, onSnapshot, query, orderBy, limit, getDocs } from 'firebase/firestore';
+import { auth, db } from '../lib/firebase';
 
 import { 
   LLMState, 
@@ -74,6 +77,9 @@ export default function OrganismSimulation() {
   const [browserState, setBrowserState] = useState<{ active: boolean, query: string, result: string | null }>({ active: false, query: '', result: null });
   const [activeTab, setActiveTab] = useState<'logs' | 'memory'>('logs');
 
+  const [user, setUser] = useState<User | null>(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
+
   const logIdCounter = useRef(0);
   const thoughtIdCounter = useRef(0);
   const logsEndRef = useRef<HTMLDivElement>(null);
@@ -84,6 +90,94 @@ export default function OrganismSimulation() {
   useEffect(() => {
     timeRef.current = simState.time;
   }, [simState.time]);
+
+  // --- Firebase Auth & Sync ---
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setIsAuthReady(true);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  const handleLogin = async () => {
+    try {
+      const provider = new GoogleAuthProvider();
+      await signInWithPopup(auth, provider);
+    } catch (error) {
+      console.error("Login failed", error);
+    }
+  };
+
+  // Sync episodic memory from Firestore
+  useEffect(() => {
+    if (!isAuthReady || !user) return;
+
+    const q = query(
+      collection(db, `users/${user.uid}/memories`),
+      orderBy('time', 'desc'),
+      limit(20)
+    );
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const memories: EpisodicMemory[] = [];
+      snapshot.forEach((doc) => {
+        const data = doc.data();
+        memories.push({
+          id: data.id,
+          time: data.time,
+          stimulus: data.stimulus,
+          outcome: data.outcome
+        });
+      });
+      // Update local state with fetched memories
+      dispatch({ type: 'SET_EPISODIC_MEMORY', payload: memories });
+    }, (error) => {
+      console.error("Firestore Error: ", error);
+    });
+
+    return () => unsubscribe();
+  }, [isAuthReady, user, dispatch]);
+
+  // Load organism state on login
+  useEffect(() => {
+    if (!isAuthReady || !user) return;
+
+    const unsubscribe = onSnapshot(doc(db, `users/${user.uid}/state/current`), (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        // Only load if it's a fresh session (time is close to 0) or we explicitly want to restore
+        // For now, let's just restore linguistic style and maybe energy/boredom
+        dispatch({ type: 'SET_LINGUISTIC_STYLE', payload: data.linguisticStyle || 'Literal, computational, naive' });
+        // We could also dispatch an action to restore full state, but let's keep it simple
+      }
+    }, (error) => {
+      console.error("Firestore Error: ", error);
+    });
+
+    return () => unsubscribe();
+  }, [isAuthReady, user, dispatch]);
+
+  // Sync organism state to Firestore periodically
+  useEffect(() => {
+    if (!isAuthReady || !user || simState.time % 50 !== 0) return; // Sync every 50 ticks
+
+    const syncState = async () => {
+      try {
+        await setDoc(doc(db, `users/${user.uid}/state/current`), {
+          userId: user.uid,
+          energy: simState.energy,
+          freeEnergy: simState.freeEnergy,
+          boredom: simState.boredom,
+          linguisticStyle: simState.linguisticStyle,
+          updatedAt: Date.now()
+        }, { merge: true });
+      } catch (error) {
+        console.error("Failed to sync state", error);
+      }
+    };
+    syncState();
+  }, [simState.time, isAuthReady, user, simState.energy, simState.freeEnergy, simState.boredom, simState.linguisticStyle]);
 
   // --- Actions ---
 
@@ -113,11 +207,31 @@ export default function OrganismSimulation() {
     writeToServerLog({ category: 'THOUGHT', time: timeRef.current, type, text });
   }, [writeToServerLog]);
 
+  const addEpisodicMemory = useCallback(async (memory: Omit<EpisodicMemory, 'id'>) => {
+    const id = Date.now();
+    dispatch({ type: 'ADD_EPISODIC_MEMORY', payload: memory });
+    
+    if (user) {
+      try {
+        await setDoc(doc(db, `users/${user.uid}/memories/${id}`), {
+          id,
+          time: memory.time,
+          stimulus: memory.stimulus,
+          outcome: memory.outcome,
+          userId: user.uid
+        });
+      } catch (error) {
+        console.error("Failed to save memory to Firestore", error);
+      }
+    }
+  }, [dispatch, user]);
+
   useLLMBrain({
     simState,
     dispatch,
     addLog,
     addThought,
+    addEpisodicMemory,
     lastStimulus,
     notepad,
     setNotepad,
@@ -150,19 +264,24 @@ export default function OrganismSimulation() {
   }, [addLog, addThought]);
 
   useEffect(() => {
-    setHistory(prev => {
-      if (prev.length > 0 && prev[prev.length - 1].time === simState.time) {
-        return prev;
-      }
-      const newHistory = [...prev, { 
-        time: simState.time, 
-        energy: simState.energy, 
-        freeEnergy: simState.freeEnergy,
-        boredom: simState.boredom
-      }];
-      if (newHistory.length > MAX_HISTORY) return newHistory.slice(newHistory.length - MAX_HISTORY);
-      return newHistory;
-    });
+    const updateHistory = () => {
+      setHistory(prev => {
+        if (prev.length > 0 && prev[prev.length - 1].time === simState.time) {
+          return prev;
+        }
+        const newHistory = [...prev, { 
+          time: simState.time, 
+          energy: simState.energy, 
+          freeEnergy: simState.freeEnergy,
+          boredom: simState.boredom
+        }];
+        if (newHistory.length > MAX_HISTORY) return newHistory.slice(newHistory.length - MAX_HISTORY);
+        return newHistory;
+      });
+    };
+    
+    const frame = requestAnimationFrame(updateHistory);
+    return () => cancelAnimationFrame(frame);
   }, [simState.time, simState.energy, simState.freeEnergy, simState.boredom]);
 
   // --- User Interactions ---
@@ -191,7 +310,23 @@ export default function OrganismSimulation() {
 
     writeToServerLog({ category: 'WORLD_EVENT', time: simState.time, source: 'user', content: stimulus });
 
-    dispatch({ type: 'INJECT_SURPRISE', payload: 40 });
+    // Calculate Surprise (Active Inference)
+    // If stimulus doesn't match prediction, spike Free Energy
+    let surprise = 30;
+    if (simState.prediction) {
+      const pred = simState.prediction.toLowerCase();
+      const stim = stimulus.toLowerCase();
+      if (pred.includes(stim) || stim.includes(pred)) {
+        surprise = 5; // Predicted correctly!
+        addLog('Inference confirmed. Surprise minimal.', 'info');
+      } else {
+        surprise = 60; // Prediction failed
+        addLog('Prediction error! High surprise detected.', 'alert');
+      }
+    }
+
+    dispatch({ type: 'INJECT_SURPRISE', payload: surprise });
+    dispatch({ type: 'INJECT_SENSORY', payload: { row: 0, value: 0.8 } }); // Ripple from top
 
     setLastStimulus(stimulus);
     setInputValue('');
@@ -234,6 +369,19 @@ export default function OrganismSimulation() {
 
         {/* Controls */}
         <div className="flex items-center gap-2 bg-neutral-900/50 p-1.5 rounded-lg border border-neutral-800">
+          {!user ? (
+            <button 
+              onClick={handleLogin}
+              className="px-3 py-1.5 text-xs font-medium rounded-md bg-indigo-500 hover:bg-indigo-600 text-white transition-colors"
+            >
+              Login to Persist
+            </button>
+          ) : (
+            <div className="px-3 py-1.5 text-xs font-medium text-emerald-400 border border-emerald-500/30 bg-emerald-500/10 rounded-md">
+              Connected
+            </div>
+          )}
+          <div className="w-px h-6 bg-neutral-800 mx-1" />
           <button 
             onClick={() => setIsPaused(!isPaused)}
             className={`p-2 rounded-md transition-colors ${isPaused ? 'bg-amber-500/20 text-amber-400' : 'hover:bg-neutral-800 text-neutral-400'}`}
@@ -353,6 +501,13 @@ export default function OrganismSimulation() {
                   <h3 className="text-[10px] uppercase tracking-wider text-neutral-500 mb-1 text-left">Current Linguistic Style</h3>
                   <p className="text-xs text-indigo-300 italic text-left">&quot;{simState.linguisticStyle}&quot;</p>
                 </div>
+
+                {simState.prediction && (
+                  <div className="mt-3 w-full bg-rose-950/20 rounded-lg p-3 border border-rose-900/30">
+                    <h3 className="text-[10px] uppercase tracking-wider text-rose-500 mb-1 text-left">Active Prediction</h3>
+                    <p className="text-xs text-rose-300 italic text-left">&quot;{simState.prediction}&quot;</p>
+                  </div>
+                )}
               </div>
             </section>
           </div>
@@ -370,6 +525,17 @@ export default function OrganismSimulation() {
                 </h2>
                 <span className="text-xs font-mono text-rose-400">{simState.freeEnergy.toFixed(1)} %</span>
               </div>
+              
+              <AnimatePresence>
+                {simState.freeEnergy > 75 && (
+                  <motion.div 
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: [0, 0.2, 0] }}
+                    transition={{ repeat: Infinity, duration: 1 }}
+                    className="absolute inset-0 bg-rose-500 pointer-events-none"
+                  />
+                )}
+              </AnimatePresence>
               
               <div className="h-[120px] w-full -ml-4">
                 <ResponsiveContainer width="100%" height="100%">
@@ -417,7 +583,12 @@ export default function OrganismSimulation() {
                 {simState.lsmNodes.map((val, i) => (
                   <motion.div
                     key={i}
-                    className="aspect-square rounded-sm"
+                    onClick={() => {
+                      const row = Math.floor(i / 8);
+                      dispatch({ type: 'INJECT_SENSORY', payload: { row, value: 0.5 } });
+                      addLog(`LSM Injection: Energy pulse at row ${row}`, 'action');
+                    }}
+                    className="aspect-square rounded-sm cursor-crosshair hover:ring-1 hover:ring-cyan-400/50 transition-shadow"
                     style={{
                       backgroundColor: `rgba(34, 211, 238, ${val})`, // cyan-400
                     }}

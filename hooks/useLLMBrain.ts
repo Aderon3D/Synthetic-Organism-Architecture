@@ -98,10 +98,12 @@ export function useLLMBrain({
       addThought('Energy restored. Awaiting input.', 'thought');
     } else if (simState.llmState === 'IDLE') {
       if (simState.freeEnergy > 75 && simState.energy > 30) {
+        dispatch({ type: 'SET_WAKING_REASON', payload: 'HIGH_UNCERTAINTY' });
         dispatch({ type: 'SET_LLM_STATE', payload: 'WAKING' });
         addLog('High Free Energy detected. Waking Prefrontal Cortex.', 'system');
         addThought('Uncertainty high. Need input.', 'thought');
       } else if (simState.boredom > 80 && simState.energy > 40) {
+        dispatch({ type: 'SET_WAKING_REASON', payload: 'HIGH_BOREDOM' });
         dispatch({ type: 'SET_LLM_STATE', payload: 'PLAYING_INIT' });
       }
     } else if (simState.llmState === 'PLAYING' && simState.boredom < 10) {
@@ -140,12 +142,14 @@ export function useLLMBrain({
       // Summarize LSM state for prompt
       const state = simStateRef.current;
       const lsmSummary = state.lsmNodes.reduce((acc, val) => acc + val, 0) / state.lsmNodes.length;
-      const lsmContext = `Sensory reservoir activity level: ${(lsmSummary * 100).toFixed(1)}%`;
+      const lsmContext = `Sensory reservoir activity level: ${(lsmSummary * 100).toFixed(1)}% (LSM resonance is ${lsmSummary > 0.4 ? 'HIGH' : 'NORMAL'}).`;
       const persona = getPersonaInstruction(state);
       
       // Dual Memory Context
       const workingMemory = notepad.slice(-5).join(' | ') || 'Empty';
       const episodicMemory = state.episodicMemory.map(m => `T=${m.time}: [Stimulus: ${m.stimulus}] -> [Outcome: ${m.outcome}]`).join('\n') || 'No significant experiences recorded.';
+      const wakingContext = state.wakingReason ? `Waking Reason: ${state.wakingReason}` : 'Reason: Spontaneous activation.';
+      const lastPrediction = state.prediction ? `Previous Prediction: "${state.prediction}"` : 'No previous prediction.';
 
       const callWithRetry = async (fn: () => Promise<any>, maxRetries = 3) => {
         let lastError;
@@ -176,6 +180,8 @@ export function useLLMBrain({
           const prompt = `${persona}
           Current state: Energy ${state.energy.toFixed(1)}%, Uncertainty ${state.freeEnergy.toFixed(1)}%, Boredom ${state.boredom.toFixed(1)}%.
           ${lsmContext}
+          ${wakingContext}
+          ${lastPrediction}
           
           [DUAL MEMORY SYSTEM]
           1. Working Memory (Recent Facts): ${workingMemory}
@@ -185,7 +191,8 @@ export function useLLMBrain({
           Last external stimulus: "${lastStimulus || 'None'}".
           
           Task: You are uncertain and must search the web to understand your environment or the last stimulus.
-          Provide your internal thought process, and the exact search query you want to type into your browser.`;
+          Provide your internal thought process, and the exact search query you want to type into your browser.
+          Also, provide a "prediction" of what you expect to find.`;
           
           const response = await callWithRetry(() => ai.models.generateContent({
             model: "gemini-3.1-flash-lite-preview",
@@ -196,9 +203,10 @@ export function useLLMBrain({
                 type: Type.OBJECT,
                 properties: {
                   thought: { type: Type.STRING },
-                  query: { type: Type.STRING }
+                  query: { type: Type.STRING },
+                  prediction: { type: Type.STRING, description: "What you expect the search to reveal." }
                 },
-                required: ["thought", "query"]
+                required: ["thought", "query", "prediction"]
               }
             }
           }));
@@ -209,6 +217,7 @@ export function useLLMBrain({
             setBrowserState({ active: true, query: res.query, result: "Searching..." });
             addThought(res.thought, 'thought');
             addThought(`[Browser] Search: "${res.query}"`, 'action');
+            dispatch({ type: 'SET_PREDICTION', payload: res.prediction });
             
             setTimeout(() => {
               if (isMountedRef.current) {
@@ -234,43 +243,20 @@ export function useLLMBrain({
         isProcessingRef.current = true;
         addLog('Uncertainty reduced. Consolidating new priors.', 'info');
         try {
-          const prompt = `${persona}
-          Task: You recently decided to search the web for: "${browserState.query}".
-          You MUST use the Google Search tool to find information about this query.
-          
-          [DUAL MEMORY SYSTEM]
-          1. Working Memory (Recent Facts): ${workingMemory}
-          2. Episodic Memory (Past Experiences): 
-          ${episodicMemory}
-
-          Based on the search results you find, provide your internal thought process on what this means to you.
-          Write a short, concise note (max 10 words) to your notepad (Working Memory).
-          Rewrite your entire "Base Linguistic Style" to incorporate this new knowledge. Keep your core traits but add the new nuance (e.g., if you were "robotic", you might become "robotic but prone to poetic metaphors"). Keep it under 15 words.
-          Finally, summarize this entire event as a new "Episodic Memory" (Outcome).`;
-          
-          const response = await callWithRetry(() => ai.models.generateContent({
+          // STEP 1: Perform search (Grounding)
+          const searchPrompt = `Search for information about: "${browserState.query}".`;
+          const searchResponse = await callWithRetry(() => ai.models.generateContent({
             model: "gemini-3.1-flash-lite-preview",
-            contents: prompt,
+            contents: searchPrompt,
             config: {
               tools: [{ googleSearch: {} }],
               toolConfig: { includeServerSideToolInvocations: true },
-              responseMimeType: "application/json",
-              responseSchema: {
-                type: Type.OBJECT,
-                properties: {
-                  thought: { type: Type.STRING },
-                  note: { type: Type.STRING },
-                  styleEvolution: { type: Type.STRING, description: "Your complete, updated Base Linguistic Style incorporating the old traits and the new nuance (max 15 words)." },
-                  outcomeSummary: { type: Type.STRING, description: "A one-sentence summary of what you learned from this search." }
-                },
-                required: ["thought", "note", "styleEvolution", "outcomeSummary"]
-              }
             }
           }));
-          
+
           // Extract search result from grounding metadata
           let searchResult = "No concrete result found.";
-          const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
+          const chunks = searchResponse.candidates?.[0]?.groundingMetadata?.groundingChunks;
           if (chunks && chunks.length > 0) {
              searchResult = chunks.map((c: any) => c.web?.title).filter(Boolean).join(", ");
              addLog(`Search successful: ${chunks.length} results found.`, 'info');
@@ -278,7 +264,44 @@ export function useLLMBrain({
              addLog(`Search returned no grounding metadata.`, 'alert');
           }
 
-          const res = JSON.parse(response.text || '{}');
+          // STEP 2: Process results into JSON
+          const processPrompt = `${persona}
+          Task: You recently searched for: "${browserState.query}".
+          Search Results: ${searchResult}
+          
+          [DUAL MEMORY SYSTEM]
+          1. Working Memory (Recent Facts): ${workingMemory}
+          2. Episodic Memory (Past Experiences): 
+          ${episodicMemory}
+          
+          Your Previous Prediction: "${state.prediction}"
+
+          Based on the search results, provide your internal thought process.
+          How much did the results surprise you compared to your prediction?
+          Write a short, concise note (max 10 words) to your notepad (Working Memory).
+          Rewrite your entire "Base Linguistic Style" to incorporate this new knowledge. Keep it under 15 words.
+          Finally, summarize this entire event as a new "Episodic Memory" (Outcome).`;
+          
+          const processResponse = await callWithRetry(() => ai.models.generateContent({
+            model: "gemini-3.1-flash-lite-preview",
+            contents: processPrompt,
+            config: {
+              responseMimeType: "application/json",
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  thought: { type: Type.STRING },
+                  note: { type: Type.STRING },
+                  styleEvolution: { type: Type.STRING, description: "Your complete, updated Base Linguistic Style (max 15 words)." },
+                  outcomeSummary: { type: Type.STRING, description: "A one-sentence summary of what you learned." },
+                  predictionError: { type: Type.NUMBER, description: "A value from 0 to 100 representing how much the result differed from your prediction." }
+                },
+                required: ["thought", "note", "styleEvolution", "outcomeSummary", "predictionError"]
+              }
+            }
+          }));
+
+          const res = JSON.parse(processResponse.text || '{}');
           if (isMountedRef.current && res.note) {
             setNotepad(prev => [...prev, res.note]);
             setBrowserState(prev => ({ ...prev, result: searchResult }));
@@ -287,6 +310,11 @@ export function useLLMBrain({
             if (res.styleEvolution) {
               dispatch({ type: 'SET_LINGUISTIC_STYLE', payload: res.styleEvolution });
               addLog(`Linguistic style evolved: ${res.styleEvolution}`, 'system');
+            }
+
+            // Update Free Energy based on prediction error
+            if (res.predictionError !== undefined) {
+              dispatch({ type: 'INJECT_SURPRISE', payload: res.predictionError - 50 }); // Adjust existing FE
             }
 
             // Add Episodic Memory
@@ -305,6 +333,7 @@ export function useLLMBrain({
             setBrowserState({ active: false, query: '', result: null });
             isProcessingRef.current = false;
             dispatch({ type: 'SET_LLM_STATE', payload: 'IDLE' });
+            dispatch({ type: 'SET_WAKING_REASON', payload: null });
           }
         } catch (e) {
           console.error(e);
@@ -380,10 +409,12 @@ export function useLLMBrain({
           Current toy state: ${toyData}
           Last action: "${lastAction}"
           Last interaction result: "${lastResult}"
+          ${lastPrediction}
           
           Available actions: ${availableActions.join(', ')}.
           
-          Provide your internal thought process on what to do next, and choose an action.`;
+          Provide your internal thought process on what to do next, and choose an action.
+          Also, provide a "prediction" of what you expect the result of this action to be.`;
           
           const response = await callWithRetry(() => ai.models.generateContent({
             model: "gemini-3.1-flash-lite-preview",
@@ -394,9 +425,10 @@ export function useLLMBrain({
                 type: Type.OBJECT,
                 properties: {
                   thought: { type: Type.STRING },
-                  action: { type: Type.STRING, enum: availableActions }
+                  action: { type: Type.STRING, enum: availableActions },
+                  prediction: { type: Type.STRING, description: "What you expect to happen after this action." }
                 },
-                required: ["thought", "action"]
+                required: ["thought", "action", "prediction"]
               }
             }
           }));
@@ -404,6 +436,7 @@ export function useLLMBrain({
           const res = JSON.parse(response.text || '{}');
           if (isMountedRef.current && res.action) {
             dispatch({ type: 'TOY_ACTION', payload: { action: res.action } });
+            dispatch({ type: 'SET_PREDICTION', payload: res.prediction });
             addThought(res.thought, 'thought');
             addThought(`[Toy] ${res.action}`, 'action');
             
@@ -412,6 +445,61 @@ export function useLLMBrain({
           }
         } catch (e) {
           console.error(e);
+        } finally {
+          isProcessingRef.current = false;
+        }
+      }
+      else if (state.llmState === 'SPONTANEOUS_THOUGHT') {
+        isProcessingRef.current = true;
+        try {
+          const prompt = `${persona}
+          Current state: Energy ${state.energy.toFixed(1)}%, Uncertainty ${state.freeEnergy.toFixed(1)}%, Boredom ${state.boredom.toFixed(1)}%.
+          ${lsmContext}
+          
+          Task: You are experiencing a spontaneous burst of cognitive activity (LSM resonance). 
+          You are not reacting to an external stimulus, but to your own internal state.
+          Provide your internal thought process. What are you thinking about? 
+          Choose a sub-goal: either search the web for something you're curious about, or decide to play with a toy.`;
+          
+          const response = await callWithRetry(() => ai.models.generateContent({
+            model: "gemini-3.1-flash-lite-preview",
+            contents: prompt,
+            config: {
+              responseMimeType: "application/json",
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  thought: { type: Type.STRING },
+                  decision: { type: Type.STRING, enum: ["FORAGE", "PLAY"] },
+                  query: { type: Type.STRING, description: "If decision is FORAGE, what is the query?" },
+                  toy: { type: Type.STRING, enum: ["blocks", "spinner", "chimes"], description: "If decision is PLAY, which toy?" }
+                },
+                required: ["thought", "decision"]
+              }
+            }
+          }));
+          
+          const res = JSON.parse(response.text || '{}');
+          if (isMountedRef.current) {
+            addThought(res.thought, 'thought');
+            addLog(`Spontaneous thought: ${res.thought.slice(0, 50)}...`, 'info');
+            
+            if (res.decision === 'FORAGE' && res.query) {
+              setBrowserState({ active: true, query: res.query, result: null });
+              dispatch({ type: 'SET_LLM_STATE', payload: 'FORAGING' });
+            } else if (res.decision === 'PLAY' && res.toy) {
+              dispatch({ type: 'SET_ACTIVE_TOY', payload: res.toy as ToyType });
+              dispatch({ type: 'SET_LLM_STATE', payload: 'PLAYING' });
+            } else {
+              dispatch({ type: 'SET_LLM_STATE', payload: 'IDLE' });
+            }
+          }
+        } catch (e) {
+          console.error(e);
+          if (isMountedRef.current) {
+            dispatch({ type: 'RESET_FREE_ENERGY' });
+            dispatch({ type: 'SET_LLM_STATE', payload: 'IDLE' });
+          }
         } finally {
           isProcessingRef.current = false;
         }

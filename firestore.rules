@@ -1,0 +1,95 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users/{userId}/memories
+    // Document ID: {memoryId}
+    // Fields:
+    //   - id: number (required)
+    //   - time: number (required)
+    //   - stimulus: string (required, max 1000 chars)
+    //   - outcome: string (required, max 5000 chars)
+    //   - userId: string (required)
+    //
+    // Collection: users/{userId}/state
+    // Document ID: current
+    // Fields:
+    //   - userId: string (required)
+    //   - energy: number (required)
+    //   - freeEnergy: number (required)
+    //   - boredom: number (required)
+    //   - linguisticStyle: string (required, max 5000 chars)
+    //   - updatedAt: number (required)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    function isValidStringLength(field, minLen, maxLen) {
+      return request.resource.data[field] is string &&
+        request.resource.data[field].size() >= minLen &&
+        request.resource.data[field].size() <= maxLen;
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+    function isValidMemory(userId) {
+      return hasOnlyAllowedFields(['id', 'time', 'stimulus', 'outcome', 'userId']) &&
+             request.resource.data.id is number &&
+             request.resource.data.time is number &&
+             isValidStringLength('stimulus', 0, 1000) &&
+             isValidStringLength('outcome', 0, 5000) &&
+             request.resource.data.userId == userId;
+    }
+
+    function isValidState(userId) {
+      return hasOnlyAllowedFields(['userId', 'energy', 'freeEnergy', 'boredom', 'linguisticStyle', 'updatedAt']) &&
+             request.resource.data.userId == userId &&
+             request.resource.data.energy is number &&
+             request.resource.data.freeEnergy is number &&
+             request.resource.data.boredom is number &&
+             isValidStringLength('linguisticStyle', 0, 5000) &&
+             request.resource.data.updatedAt is number;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+    match /users/{userId} {
+      // Allow reading the user document if it's the owner
+      allow read: if isOwner(userId);
+      
+      match /memories/{memoryId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidMemory(userId);
+        allow update: if isOwner(userId) && isValidMemory(userId);
+        allow delete: if isOwner(userId);
+      }
+
+      match /state/{stateId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidState(userId);
+        allow update: if isOwner(userId) && isValidState(userId);
+      }
+    }
+  }
+}

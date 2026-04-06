@@ -17,56 +17,115 @@ import {
 } from '../lib/simulationEngine';
 
 type SimulationAction = 
-  | { type: 'TICK' }
+  | { type: 'TICK'; payload: { timestamp: number } }
   | { type: 'SET_LLM_STATE', payload: LLMState }
+  | { type: 'SET_WAKING_REASON', payload: string | null }
+  | { type: 'SET_PREDICTION', payload: string | null }
   | { type: 'INJECT_SURPRISE', payload: number }
+  | { type: 'INJECT_SENSORY', payload: { row: number; value: number } }
   | { type: 'DRAIN_ENERGY', payload: number }
   | { type: 'RESET_BOREDOM' }
   | { type: 'RESET_FREE_ENERGY' }
   | { type: 'SET_ACTIVE_TOY', payload: ToyType | null }
   | { type: 'TOY_ACTION', payload: { action: string } }
   | { type: 'SET_LINGUISTIC_STYLE', payload: string }
-  | { type: 'ADD_EPISODIC_MEMORY', payload: Omit<EpisodicMemory, 'id'> };
+  | { type: 'ADD_EPISODIC_MEMORY', payload: Omit<EpisodicMemory, 'id'> }
+  | { type: 'SET_EPISODIC_MEMORY', payload: EpisodicMemory[] };
+
+interface SimulationState {
+  time: number;
+  lastTickTime: number;
+  energy: number;
+  freeEnergy: number;
+  boredom: number;
+  llmState: LLMState;
+  lsmNodes: number[];
+  activeToy: ToyType | null;
+  toyState: {
+    type: ToyType | null;
+    data: any;
+    lastAction: string | null;
+    lastResult: string | null;
+  };
+  episodicMemory: EpisodicMemory[];
+  wakingReason: string | null;
+  prediction: string | null;
+  linguisticStyle: string;
+}
 
 function simulationReducer(state: SimulationState, action: SimulationAction): SimulationState {
   switch (action.type) {
     case 'TICK': {
+      const lastTime = state.lastTickTime === 0 ? action.payload.timestamp - 100 : state.lastTickTime;
+      const dt = (action.payload.timestamp - lastTime) / 1000;
+      if (dt <= 0) return state;
+
       const nextTime = state.time + 1;
       
       // 1. Update LSM
       const noiseLevel = state.freeEnergy / 100;
-      const nextLsmNodes = calculateNextLsmNodes(state.lsmNodes, noiseLevel);
+      const nextLsmNodes = calculateNextLsmNodes(state.lsmNodes, noiseLevel, state.llmState, dt);
+      
+      // Calculate LSM activity
+      const lsmActivity = nextLsmNodes.reduce((a, b) => a + b, 0) / nextLsmNodes.length;
 
       // 2. Update Metabolism
-      const nextEnergy = calculateNextMetabolism(state.energy, state.llmState);
+      const nextEnergy = calculateNextMetabolism(state.energy, state.llmState, dt);
 
       // 3. Update Active Inference
-      const { freeEnergy: nextFreeEnergy, boredom: nextBoredom } = calculateNextActiveInference(state.freeEnergy, state.boredom, state.llmState);
+      const { freeEnergy: nextFreeEnergy, boredom: nextBoredom } = calculateNextActiveInference(state.freeEnergy, state.boredom, state.llmState, dt);
 
-      // 4. Update Toy State (Natural Decay)
+      // 4. Spontaneity Check: High LSM activity + IDLE state can trigger spontaneous thought
+      let nextLlmState = state.llmState;
+      let nextWakingReason = state.wakingReason;
+      
+      if (state.llmState === 'IDLE' && lsmActivity > 0.4 && Math.random() < 0.05) {
+        nextLlmState = 'SPONTANEOUS_THOUGHT';
+        nextWakingReason = 'LSM_RESONANCE';
+      }
+
+      // 5. Update Toy State (Natural Decay)
       let nextToyState = { ...state.toyState };
       if (nextToyState.type === 'spinner' && nextToyState.data) {
         const d = { ...nextToyState.data } as SpinnerData;
-        d.rpm = Math.max(0, d.rpm - 10);
+        d.rpm = Math.max(0, d.rpm - (10 * dt * 10)); // Scaled decay
         nextToyState.data = d;
       } else if (nextToyState.type === 'chimes' && nextToyState.data) {
         const d = { ...nextToyState.data } as ChimesData;
-        d.resonance = Math.max(0, d.resonance - 5);
+        d.resonance = Math.max(0, d.resonance - (5 * dt * 10));
         nextToyState.data = d;
       }
 
       return {
         ...state,
         time: nextTime,
+        lastTickTime: action.payload.timestamp,
         energy: nextEnergy,
         freeEnergy: nextFreeEnergy,
         boredom: nextBoredom,
+        llmState: nextLlmState,
+        wakingReason: nextWakingReason,
         lsmNodes: nextLsmNodes,
         toyState: nextToyState
       };
     }
+    case 'INJECT_SENSORY': {
+      const dt = 0.1; 
+      const nextLsmNodes = calculateNextLsmNodes(
+        state.lsmNodes,
+        0.1,
+        state.llmState,
+        dt,
+        action.payload
+      );
+      return { ...state, lsmNodes: nextLsmNodes };
+    }
     case 'SET_LLM_STATE':
       return { ...state, llmState: action.payload };
+    case 'SET_WAKING_REASON':
+      return { ...state, wakingReason: action.payload };
+    case 'SET_PREDICTION':
+      return { ...state, prediction: action.payload };
     case 'INJECT_SURPRISE':
       return { ...state, freeEnergy: clamp(state.freeEnergy + action.payload, 0, 100) };
     case 'DRAIN_ENERGY':
@@ -174,6 +233,11 @@ function simulationReducer(state: SimulationState, action: SimulationAction): Si
           { ...action.payload, id: Date.now() }
         ].slice(-10) // Keep only last 10 experiences
       };
+    case 'SET_EPISODIC_MEMORY':
+      return {
+        ...state,
+        episodicMemory: action.payload
+      };
     default:
       return state;
   }
@@ -185,10 +249,13 @@ export function useSimulationLoop(initialTickRate: number = TICK_RATES.REALTIME)
 
   const [simState, dispatch] = useReducer(simulationReducer, {
     time: 0,
+    lastTickTime: 0, // Initialized to 0 to avoid impurity
     energy: 80,
     freeEnergy: 10,
     boredom: 0,
     llmState: 'IDLE',
+    wakingReason: null,
+    prediction: null,
     lsmNodes: generateInitialLSM(),
     linguisticStyle: 'Literal, computational, naive',
     episodicMemory: [],
@@ -201,7 +268,7 @@ export function useSimulationLoop(initialTickRate: number = TICK_RATES.REALTIME)
   });
 
   const tick = useCallback(() => {
-    dispatch({ type: 'TICK' });
+    dispatch({ type: 'TICK', payload: { timestamp: Date.now() } });
   }, []);
 
   useEffect(() => {
