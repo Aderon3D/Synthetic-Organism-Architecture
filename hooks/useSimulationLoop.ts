@@ -16,8 +16,9 @@ import {
   ChimesData
 } from '../lib/simulationEngine';
 import { stepActiveInference } from '../lib/activeInference';
+import { Attractor, CharacterSeed, calculateNextAttractors, DEFAULT_CHARACTER_SEED } from '../lib/attractorEngine';
 
-type SimulationAction = 
+export type SimulationAction = 
   | { type: 'TICK'; payload: { timestamp: number } }
   | { type: 'SET_LLM_STATE', payload: LLMState }
   | { type: 'SET_WAKING_REASON', payload: string | null }
@@ -32,7 +33,13 @@ type SimulationAction =
   | { type: 'SET_LINGUISTIC_STYLE', payload: string }
   | { type: 'ADD_EPISODIC_MEMORY', payload: Omit<EpisodicMemory, 'id'> }
   | { type: 'SET_EPISODIC_MEMORY', payload: EpisodicMemory[] }
-  | { type: 'SET_OBSERVATION', payload: number };
+  | { type: 'SET_OBSERVATION', payload: number }
+  | { type: 'INJECT_ATTRACTORS'; payload: Attractor[] }
+  | { type: 'REMOVE_ATTRACTOR'; payload: string }
+  | { type: 'SET_UNCONSCIOUS_PROCESSING'; payload: boolean }
+  | { type: 'SET_VOICE_PROCESSING'; payload: boolean }
+  | { type: 'UPDATE_CHARACTER_SEED'; payload: Partial<CharacterSeed> }
+  | { type: 'DISCHARGE_ATTRACTOR'; payload: { id: string, amount: number } };
 
 // We extend the imported SimulationState with local fields
 interface LocalSimulationState extends SimulationState {
@@ -121,7 +128,31 @@ function simulationReducer(state: LocalSimulationState, action: SimulationAction
       // Use ODE for boredom so it can satiate during play
       const { boredom: nextBoredom } = calculateNextActiveInference(state.freeEnergy, state.boredom, state.llmState, dt);
 
-      // 5. Update Toy State (Natural Decay)
+      // 5. Update Attractors
+      const nextAttractors = calculateNextAttractors(state.attractors, dt, nextBoredom, state.characterSeed.driveProfile);
+
+      // Trigger Unconscious (LLM 1)
+      let nextUnconsciousProcessing = state.unconsciousProcessing;
+      const shouldTriggerUnconscious = 
+        !state.unconsciousProcessing && 
+        (aiResult.vfe > 1.5 || lsmActivity > 0.8 || nextTime % 500 === 0);
+
+      if (shouldTriggerUnconscious) {
+        nextUnconsciousProcessing = true;
+      }
+
+      // Trigger Voice (LLM 2)
+      let nextVoiceProcessing = state.voiceProcessing;
+      const highPressureAttractor = nextAttractors.find(a => a.pressure > 90);
+      const shouldTriggerVoice = 
+        !state.voiceProcessing && 
+        (highPressureAttractor || nextWakingReason === 'USER_STIMULUS');
+
+      if (shouldTriggerVoice) {
+        nextVoiceProcessing = true;
+      }
+
+      // 6. Update Toy State (Natural Decay)
       let nextToyState = { ...state.toyState };
       if (nextToyState.type === 'spinner' && nextToyState.data) {
         const d = { ...nextToyState.data } as SpinnerData;
@@ -150,7 +181,10 @@ function simulationReducer(state: LocalSimulationState, action: SimulationAction
         activeInferenceAction: aiResult.action,
         currentObservation: observation,
         actionConfidence: nextActionConfidence,
-        ticksSinceLastLlmCall: nextTicksSinceLastLlmCall
+        ticksSinceLastLlmCall: nextTicksSinceLastLlmCall,
+        attractors: nextAttractors,
+        unconsciousProcessing: nextUnconsciousProcessing,
+        voiceProcessing: nextVoiceProcessing
       };
     }
     case 'INJECT_SENSORY': {
@@ -284,6 +318,33 @@ function simulationReducer(state: LocalSimulationState, action: SimulationAction
       };
     case 'SET_OBSERVATION':
       return { ...state, currentObservation: action.payload };
+    case 'INJECT_ATTRACTORS': {
+      const newAttractors = [...state.attractors];
+      action.payload.forEach(newA => {
+        const existingIdx = newAttractors.findIndex(a => a.id === newA.id);
+        if (existingIdx >= 0) {
+          newAttractors[existingIdx] = { ...newAttractors[existingIdx], ...newA };
+        } else {
+          newAttractors.push(newA);
+        }
+      });
+      return { ...state, attractors: newAttractors };
+    }
+    case 'REMOVE_ATTRACTOR':
+      return { ...state, attractors: state.attractors.filter(a => a.id !== action.payload) };
+    case 'DISCHARGE_ATTRACTOR':
+      return {
+        ...state,
+        attractors: state.attractors.map(a => 
+          a.id === action.payload.id ? { ...a, pressure: Math.max(0, a.pressure - action.payload.amount) } : a
+        )
+      };
+    case 'SET_UNCONSCIOUS_PROCESSING':
+      return { ...state, unconsciousProcessing: action.payload };
+    case 'SET_VOICE_PROCESSING':
+      return { ...state, voiceProcessing: action.payload };
+    case 'UPDATE_CHARACTER_SEED':
+      return { ...state, characterSeed: { ...state.characterSeed, ...action.payload } };
     default:
       return state;
   }
@@ -318,7 +379,11 @@ export function useSimulationLoop(initialTickRate: number = TICK_RATES.REALTIME)
     activeInferenceAction: 0,
     currentObservation: 0,
     actionConfidence: 0,
-    ticksSinceLastLlmCall: 0
+    ticksSinceLastLlmCall: 0,
+    characterSeed: DEFAULT_CHARACTER_SEED,
+    attractors: [],
+    unconsciousProcessing: false,
+    voiceProcessing: false
   });
 
   const tick = useCallback(() => {

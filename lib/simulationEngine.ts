@@ -1,3 +1,5 @@
+import { Attractor, CharacterSeed, DEFAULT_CHARACTER_SEED } from './attractorEngine';
+
 export type LLMState = 'SLEEPING' | 'IDLE' | 'WAKING' | 'FORAGING' | 'CONSOLIDATING' | 'PLAYING_INIT' | 'PLAYING' | 'SPONTANEOUS_THOUGHT';
 
 export interface EpisodicMemory {
@@ -50,6 +52,11 @@ export interface SimulationState {
   currentObservation: number;
   actionConfidence: number;
   ticksSinceLastLlmCall: number;
+  // Sandwich Architecture
+  characterSeed: CharacterSeed;
+  attractors: Attractor[];
+  unconsciousProcessing: boolean;
+  voiceProcessing: boolean;
 }
 
 export interface HistoryPoint {

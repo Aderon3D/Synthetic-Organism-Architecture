@@ -52,7 +52,8 @@ import {
   clamp
 } from '../lib/simulationEngine';
 import { useSimulationLoop } from '../hooks/useSimulationLoop';
-import { useLLMBrain } from '../hooks/useLLMBrain';
+import { useUnconscious } from '../hooks/useUnconscious';
+import { useVoice } from '../hooks/useVoice';
 
 // --- Main Component ---
 
@@ -229,18 +230,8 @@ export default function OrganismSimulation() {
     }
   }, [dispatch, user]);
 
-  useLLMBrain({
-    simState,
-    dispatch,
-    addLog,
-    addThought,
-    addEpisodicMemory,
-    lastStimulus,
-    notepad,
-    setNotepad,
-    browserState,
-    setBrowserState,
-  });
+  useUnconscious(simState, dispatch, addLog);
+  useVoice(simState, dispatch, addLog, addThought);
 
   // Auto-scroll logs
   useEffect(() => {
@@ -579,6 +570,59 @@ export default function OrganismSimulation() {
                     <AlertTriangle className="w-3 h-3" />
                     Inject Surprise
                   </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Attractors Panel */}
+            <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-5 relative overflow-hidden">
+              <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-purple-500/20 to-purple-500/5" />
+              <h3 className="text-sm font-medium text-neutral-300 mb-4 flex items-center gap-2">
+                <Brain className="w-4 h-4 text-purple-400" />
+                Active Attractors
+              </h3>
+              
+              <div className="space-y-3">
+                {simState.attractors.length === 0 ? (
+                  <p className="text-xs text-neutral-500 italic">No active attractors. Unconscious mind is quiet.</p>
+                ) : (
+                  simState.attractors.map(attractor => (
+                    <div key={attractor.id} className="bg-neutral-950 border border-neutral-800 rounded p-3">
+                      <div className="flex justify-between items-start mb-2">
+                        <span className="text-xs font-medium text-neutral-300">{attractor.concept}</span>
+                        <span className="text-[10px] px-1.5 py-0.5 bg-neutral-800 text-neutral-400 rounded uppercase tracking-wider">
+                          {attractor.type}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <div className="flex-1 h-1.5 bg-neutral-800 rounded-full overflow-hidden">
+                          <motion.div 
+                            className={clsx(
+                              "h-full",
+                              attractor.pressure > 80 ? "bg-red-500" : 
+                              attractor.pressure > 50 ? "bg-amber-500" : "bg-purple-500"
+                            )}
+                            animate={{ width: `${attractor.pressure}%` }}
+                            transition={{ type: 'spring', bounce: 0, duration: 0.5 }}
+                          />
+                        </div>
+                        <span className="text-xs font-mono text-neutral-500 w-8 text-right">
+                          {Math.round(attractor.pressure)}
+                        </span>
+                      </div>
+                    </div>
+                  ))
+                )}
+                
+                <div className="flex justify-between items-center mt-2 pt-2 border-t border-neutral-800/50">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] text-neutral-500">Unconscious:</span>
+                    <span className={clsx("w-2 h-2 rounded-full", simState.unconsciousProcessing ? "bg-emerald-500 animate-pulse" : "bg-neutral-700")} />
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] text-neutral-500">Voice:</span>
+                    <span className={clsx("w-2 h-2 rounded-full", simState.voiceProcessing ? "bg-emerald-500 animate-pulse" : "bg-neutral-700")} />
+                  </div>
                 </div>
               </div>
             </div>
