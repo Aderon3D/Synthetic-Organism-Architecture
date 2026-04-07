@@ -10,6 +10,7 @@ export function useVoice(
   addThought: (msg: string, type: any) => void
 ) {
   const isProcessingRef = useRef(false);
+  const expressionCounterRef = useRef(0);
 
   useEffect(() => {
     if (simState.voiceProcessing && !isProcessingRef.current) {
@@ -23,15 +24,16 @@ export function useVoice(
           const dominantAttractor = [...simState.attractors].sort((a, b) => b.pressure - a.pressure)[0];
           
           const prompt = `
-          Character Identity: ${simState.characterSeed.identity}
-          Context: ${simState.characterSeed.currentContext}
-          Voice: ${simState.characterSeed.voiceDescriptor}
+          A mind in the following state, speaking in the following voice, expresses itself.
           
-          State: Energy ${simState.energy.toFixed(1)}, Surprise ${simState.freeEnergy.toFixed(1)}, Boredom ${simState.boredom.toFixed(1)}.
-          Dominant Attractor: "${dominantAttractor ? dominantAttractor.concept : 'None'}"
-          Trigger: ${simState.wakingReason}
+          Voice Register: ${simState.characterSeed.voiceDescriptor}
+          Current Context: ${simState.characterSeed.currentContext}
           
-          Task: Express this state in a short, in-character stream of consciousness or action. Do not break character. Do not explain. Just output the thought or dialogue.
+          Internal State: Energy ${simState.energy.toFixed(1)}, Surprise ${simState.freeEnergy.toFixed(1)}, Boredom ${simState.boredom.toFixed(1)}.
+          Dominant Internal Attractor: "${dominantAttractor ? dominantAttractor.concept : 'None'}"
+          Triggering Event: ${simState.wakingReason}
+          
+          Task: Output a short, localized expression (thought or dialogue). Do not explain. Do not use labels. Just the expression.
           `;
           
           const response = await generateContentWithFallback({
@@ -41,10 +43,31 @@ export function useVoice(
           const text = response.text?.trim();
           if (text) {
             addThought(text, 'thought');
+            expressionCounterRef.current++;
             
-            // Discharge the attractor
+            // Discharge the attractor based on obsessionCoefficient
+            // Low obsessionCoefficient (e.g. 0.1) = slow discharge = high persistence
             if (dominantAttractor) {
-              dispatch({ type: 'DISCHARGE_ATTRACTOR', payload: { id: dominantAttractor.id, amount: 50 } });
+              const dischargeAmount = 100 * simState.characterSeed.driveProfile.obsessionCoefficient;
+              dispatch({ type: 'DISCHARGE_ATTRACTOR', payload: { id: dominantAttractor.id, amount: Math.max(10, dischargeAmount) } });
+            }
+
+            // Slow style drift: nudge the voiceDescriptor slightly
+            // Gated: Only 15% chance, and only every 4th expression
+            if (expressionCounterRef.current % 4 === 0 && Math.random() < 0.15) {
+              const nudgePrompt = `
+              Current Voice Descriptor: ${simState.characterSeed.voiceDescriptor}
+              Recent Expression: "${text}"
+              
+              Task: Nudge the voice descriptor slightly to reflect a subtle evolution in mood or focus based on the recent expression. 
+              Output ONLY the new descriptor (3-5 adjectives). 
+              Keep it under 50 characters.
+              `;
+              const nudgeRes = await generateContentWithFallback({ contents: nudgePrompt });
+              const newVoice = nudgeRes.text?.trim();
+              if (newVoice && newVoice.length < 60) {
+                dispatch({ type: 'UPDATE_CHARACTER_SEED', payload: { voiceDescriptor: newVoice } });
+              }
             }
           }
         } catch (e) {

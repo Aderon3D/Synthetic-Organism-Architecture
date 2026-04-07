@@ -4,6 +4,9 @@ const ai = new GoogleGenAI({ apiKey: process.env.NEXT_PUBLIC_GEMINI_API_KEY });
 
 const PRIMARY_MODEL = "gemini-3-flash-preview";
 const BACKUP_MODEL = "gemini-3.1-flash-lite-preview";
+const TERTIARY_MODEL = "gemini-2.5-pro";
+const QUATERNARY_MODEL = "gemini-2.5-flash";
+const QUINARY_MODEL = "gemini-2.5-flash-lite";
 const EXHAUSTION_KEY = "gemini_model_exhaustion";
 
 interface ExhaustionState {
@@ -53,7 +56,13 @@ function markModelExhausted(model: string) {
 export async function generateContentWithFallback(
   params: Omit<GenerateContentParameters, 'model'>
 ): Promise<GenerateContentResponse> {
-  const modelsToTry = [PRIMARY_MODEL, BACKUP_MODEL];
+  const modelsToTry = [
+    PRIMARY_MODEL, 
+    BACKUP_MODEL, 
+    TERTIARY_MODEL, 
+    QUATERNARY_MODEL, 
+    QUINARY_MODEL
+  ];
   let lastError: any = null;
 
   for (const model of modelsToTry) {

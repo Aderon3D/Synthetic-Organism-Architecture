@@ -2,7 +2,7 @@ export interface Attractor {
   id: string;
   concept: string;
   pressure: number; // 0 to 100
-  decayRate: number; // How fast pressure builds/decays
+  buildRate: number; // How fast pressure builds
   type: 'EPISTEMIC' | 'PRAGMATIC' | 'SOCIAL';
 }
 
@@ -12,21 +12,21 @@ export interface CharacterSeed {
   voiceDescriptor: string;
   driveProfile: {
     boredomRate: number;
-    obsessionCoefficient: number;
+    obsessionCoefficient: number; // Low = high persistence (slow decay)
     socialEnergyCost: number;
     stimulationCeiling: number;
   };
 }
 
 export const DEFAULT_CHARACTER_SEED: CharacterSeed = {
-  identity: "Sherlock Holmes, London 1895",
-  currentContext: "A study in Baker Street. A client has just left a strange pipe on the table.",
-  voiceDescriptor: "Analytical, cold, precise, slightly impatient.",
+  identity: "A blank slate cognitive entity.",
+  currentContext: "A nicely decorated wooden waiting room. The only interesting objects are the toys on the central table.",
+  voiceDescriptor: "Neutral, observant, calm, literal.",
   driveProfile: {
-    boredomRate: 5.0,
-    obsessionCoefficient: 0.1,
-    socialEnergyCost: 2.0,
-    stimulationCeiling: 85
+    boredomRate: 3.0,
+    obsessionCoefficient: 0.5, // Balanced focus
+    socialEnergyCost: 1.0,
+    stimulationCeiling: 75
   }
 };
 
@@ -38,13 +38,17 @@ export function calculateNextAttractors(
   driveProfile: CharacterSeed['driveProfile']
 ): Attractor[] {
   return currentAttractors.map(a => {
-    // Pressure builds based on base decay rate and boredom
-    // If obsessed, pressure builds faster or stays high
-    let pressureDelta = a.decayRate * dt * (1 + boredom / 100);
+    // 1. Pressure build (driven by boredom and base build rate)
+    const build = a.buildRate * dt * (1 + boredom / 100);
+    
+    // 2. Natural decay (driven by obsessionCoefficient)
+    // Low obsessionCoefficient (e.g. 0.1) = slow decay = high persistence
+    const baseDecay = 1.0; // Base units per second
+    const decay = baseDecay * driveProfile.obsessionCoefficient * dt;
     
     return {
       ...a,
-      pressure: Math.min(100, Math.max(0, a.pressure + pressureDelta))
+      pressure: Math.min(100, Math.max(0, a.pressure + build - decay))
     };
   });
 }

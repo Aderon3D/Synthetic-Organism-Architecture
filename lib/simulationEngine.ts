@@ -204,7 +204,8 @@ export function calculateNextActiveInference(
   prevFreeEnergy: number, 
   prevBoredom: number, 
   llmState: LLMState, 
-  dt: number
+  dt: number,
+  driveProfile: CharacterSeed['driveProfile']
 ): { freeEnergy: number, boredom: number } {
   let nextFreeEnergy = prevFreeEnergy;
   let nextBoredom = prevBoredom;
@@ -212,15 +213,18 @@ export function calculateNextActiveInference(
   if (llmState === 'IDLE') {
     // Uncertainty drift (Entropy increase)
     nextFreeEnergy += 0.8 * dt;
-    // Boredom drift
-    nextBoredom += 3.0 * dt;
+    // Boredom drift (scaled by boredomRate)
+    nextBoredom += (driveProfile.boredomRate || 3.0) * dt;
   } else if (llmState === 'FORAGING' || llmState === 'WAKING' || llmState === 'CONSOLIDATING') {
     // Active reduction of uncertainty
     const k = 0.5;
     nextFreeEnergy = prevFreeEnergy * Math.exp(-k * dt);
     nextBoredom = prevBoredom * Math.exp(-2.0 * dt);
   } else if (llmState === 'PLAYING' || llmState === 'PLAYING_INIT') {
-    nextFreeEnergy += 1.5 * dt; // Entropy increase from stimulation
+    // Entropy increase from stimulation, capped by stimulationCeiling
+    const stimulationFactor = Math.max(0, (driveProfile.stimulationCeiling - prevFreeEnergy) / 100);
+    nextFreeEnergy += 1.5 * stimulationFactor * dt; 
+    
     const k = 0.4;
     nextBoredom = prevBoredom * Math.exp(-k * dt);
   } else if (llmState === 'SLEEPING') {

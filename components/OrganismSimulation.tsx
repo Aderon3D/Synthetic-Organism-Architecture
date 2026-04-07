@@ -20,7 +20,9 @@ import {
   Search,
   PenTool,
   Gamepad2,
-  MessageSquare
+  MessageSquare,
+  Sparkles,
+  Settings
 } from 'lucide-react';
 import { 
   LineChart, 
@@ -54,6 +56,10 @@ import {
 import { useSimulationLoop } from '../hooks/useSimulationLoop';
 import { useUnconscious } from '../hooks/useUnconscious';
 import { useVoice } from '../hooks/useVoice';
+import CalibrationModal from './CalibrationModal';
+import { CharacterSeed } from '../lib/attractorEngine';
+import { generateContentWithFallback } from '../lib/gemini';
+import { Type } from '@google/genai';
 
 // --- Main Component ---
 
@@ -82,6 +88,7 @@ export default function OrganismSimulation() {
 
   const [user, setUser] = useState<User | null>(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
+  const [isCalibrationOpen, setIsCalibrationOpen] = useState(false);
 
   const logIdCounter = useRef(0);
   const thoughtIdCounter = useRef(0);
@@ -313,6 +320,51 @@ export default function OrganismSimulation() {
     setLastStimulus(stimulus);
     setInputValue('');
     addLog(`Sensory input received: "${stimulus}"`, 'info');
+
+    // Trigger Semantic Discharge Evaluation
+    evaluateSemanticDischarge(stimulus);
+  };
+
+  const evaluateSemanticDischarge = async (stimulus: string) => {
+    if (simState.attractors.length === 0) return;
+
+    try {
+      const prompt = `
+      Task: Determine if a user's input resolves or addresses any of the character's current internal thoughts/attractors.
+      
+      User Input: "${stimulus}"
+      Current Internal Attractors: ${JSON.stringify(simState.attractors.map(a => ({ id: a.id, concept: a.concept })))}
+      
+      If the user input directly addresses, answers, or resolves an attractor, return the IDs of those attractors.
+      Output JSON only: { "resolvedIds": ["id1", "id2"] }
+      If none are resolved, return an empty array.
+      `;
+
+      const response = await generateContentWithFallback({
+        contents: prompt,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              resolvedIds: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING }
+              }
+            },
+            required: ["resolvedIds"]
+          }
+        }
+      });
+
+      const res = JSON.parse(response.text || '{}');
+      if (res.resolvedIds && res.resolvedIds.length > 0) {
+        dispatch({ type: 'SEMANTIC_DISCHARGE', payload: { attractorIds: res.resolvedIds, amount: 80 } });
+        addLog(`Semantic match: User input addressed ${res.resolvedIds.length} internal thoughts.`, 'info');
+      }
+    } catch (e) {
+      console.error("Semantic discharge evaluation error:", e);
+    }
   };
 
   const drainEnergy = () => {
@@ -321,6 +373,12 @@ export default function OrganismSimulation() {
   };
 
   // --- Render Helpers ---
+
+  const handleCalibrate = (newSeed: CharacterSeed) => {
+    dispatch({ type: 'UPDATE_CHARACTER_SEED', payload: newSeed });
+    addLog(`System Calibrated: Identity aligned to ${newSeed.identity}`, 'system');
+    addThought(`Calibration complete. I feel... ${newSeed.voiceDescriptor.split(',')[0]}`, 'thought');
+  };
 
   const getLlmStateColor = (state: LLMState) => {
     switch (state) {
@@ -336,6 +394,11 @@ export default function OrganismSimulation() {
 
   return (
     <div className="min-h-screen bg-neutral-950 text-neutral-200 p-4 md:p-8 font-sans selection:bg-indigo-500/30">
+      <CalibrationModal 
+        isOpen={isCalibrationOpen} 
+        onClose={() => setIsCalibrationOpen(false)} 
+        onCalibrate={handleCalibrate} 
+      />
       
       {/* Header */}
       <header className="max-w-7xl mx-auto mb-8 flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -351,6 +414,16 @@ export default function OrganismSimulation() {
 
         {/* Controls */}
         <div className="flex items-center gap-2 bg-neutral-900/50 p-1.5 rounded-lg border border-neutral-800">
+          <button 
+            onClick={() => setIsCalibrationOpen(true)}
+            className="flex items-center gap-2 px-3 py-1.5 bg-purple-500/10 border border-purple-500/20 hover:bg-purple-500/20 text-purple-400 rounded-md text-xs font-medium transition-all group"
+          >
+            <Sparkles className="w-3.5 h-3.5 group-hover:rotate-12 transition-transform" />
+            Calibrate
+          </button>
+          
+          <div className="w-[1px] h-4 bg-neutral-800 mx-1" />
+          
           {!user ? (
             <button 
               onClick={handleLogin}

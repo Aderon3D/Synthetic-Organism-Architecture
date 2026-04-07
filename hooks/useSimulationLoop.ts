@@ -39,7 +39,8 @@ export type SimulationAction =
   | { type: 'SET_UNCONSCIOUS_PROCESSING'; payload: boolean }
   | { type: 'SET_VOICE_PROCESSING'; payload: boolean }
   | { type: 'UPDATE_CHARACTER_SEED'; payload: Partial<CharacterSeed> }
-  | { type: 'DISCHARGE_ATTRACTOR'; payload: { id: string, amount: number } };
+  | { type: 'DISCHARGE_ATTRACTOR'; payload: { id: string, amount: number } }
+  | { type: 'SEMANTIC_DISCHARGE'; payload: { attractorIds: string[], amount: number } };
 
 // We extend the imported SimulationState with local fields
 interface LocalSimulationState extends SimulationState {
@@ -126,7 +127,7 @@ function simulationReducer(state: LocalSimulationState, action: SimulationAction
       const nextFreeEnergy = clamp(aiResult.vfe * 50, 0, 100);
       
       // Use ODE for boredom so it can satiate during play
-      const { boredom: nextBoredom } = calculateNextActiveInference(state.freeEnergy, state.boredom, state.llmState, dt);
+      const { boredom: nextBoredom } = calculateNextActiveInference(state.freeEnergy, state.boredom, state.llmState, dt, state.characterSeed.driveProfile);
 
       // 5. Update Attractors
       const nextAttractors = calculateNextAttractors(state.attractors, dt, nextBoredom, state.characterSeed.driveProfile);
@@ -135,7 +136,7 @@ function simulationReducer(state: LocalSimulationState, action: SimulationAction
       let nextUnconsciousProcessing = state.unconsciousProcessing;
       const shouldTriggerUnconscious = 
         !state.unconsciousProcessing && 
-        (aiResult.vfe > 1.5 || lsmActivity > 0.8 || nextTime % 500 === 0);
+        (aiResult.vfe > 1.5 || lsmActivity > 0.8);
 
       if (shouldTriggerUnconscious) {
         nextUnconsciousProcessing = true;
@@ -196,7 +197,16 @@ function simulationReducer(state: LocalSimulationState, action: SimulationAction
         dt,
         action.payload
       );
-      return { ...state, lsmNodes: nextLsmNodes };
+      
+      // Social energy cost
+      const energyCost = state.characterSeed.driveProfile.socialEnergyCost || 0;
+      
+      return { 
+        ...state, 
+        lsmNodes: nextLsmNodes,
+        energy: clamp(state.energy - energyCost, 0, 100),
+        wakingReason: 'USER_STIMULUS'
+      };
     }
     case 'SET_LLM_STATE':
       return { ...state, llmState: action.payload };
@@ -319,7 +329,7 @@ function simulationReducer(state: LocalSimulationState, action: SimulationAction
     case 'SET_OBSERVATION':
       return { ...state, currentObservation: action.payload };
     case 'INJECT_ATTRACTORS': {
-      const newAttractors = [...state.attractors];
+      let newAttractors = [...state.attractors];
       action.payload.forEach(newA => {
         const existingIdx = newAttractors.findIndex(a => a.id === newA.id);
         if (existingIdx >= 0) {
@@ -328,6 +338,14 @@ function simulationReducer(state: LocalSimulationState, action: SimulationAction
           newAttractors.push(newA);
         }
       });
+
+      // Cap at 7 attractors, pruning lowest pressure ones
+      if (newAttractors.length > 7) {
+        newAttractors = newAttractors
+          .sort((a, b) => b.pressure - a.pressure)
+          .slice(0, 7);
+      }
+
       return { ...state, attractors: newAttractors };
     }
     case 'REMOVE_ATTRACTOR':
@@ -339,6 +357,15 @@ function simulationReducer(state: LocalSimulationState, action: SimulationAction
           a.id === action.payload.id ? { ...a, pressure: Math.max(0, a.pressure - action.payload.amount) } : a
         )
       };
+    case 'SEMANTIC_DISCHARGE': {
+      const { attractorIds, amount } = action.payload;
+      return {
+        ...state,
+        attractors: state.attractors.map(a => 
+          attractorIds.includes(a.id) ? { ...a, pressure: Math.max(0, a.pressure - amount) } : a
+        )
+      };
+    }
     case 'SET_UNCONSCIOUS_PROCESSING':
       return { ...state, unconsciousProcessing: action.payload };
     case 'SET_VOICE_PROCESSING':
